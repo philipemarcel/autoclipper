@@ -261,6 +261,7 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
                             max_cuts=1,
                             work_dir=work_root / "yt_meta",
                             processed_state=processed_state,
+                            max_age_hours=prof.detection.recap_hours,
                         )
                         for ytc in yt_clusters:
                             process_single_cluster(prof, ytc, store, theme, processed_state, work_root)

@@ -28,6 +28,8 @@ profiles:
       min_views_single_clip_live: 80
       # Modo Repescagem (pós-live): pega os mais vistos da sessão encerrada sem repetir trechos
       min_views_post_live: 120
+      # Faz repescagem apenas das lives/VODs mais recentes (horas máximas atrás: 36h)
+      recap_hours: 36
       # Alto volume: meta de 8 a 15 cortes por live
       max_cuts_per_stream: 15
       max_cuts_per_run: 4

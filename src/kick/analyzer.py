@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -105,10 +105,15 @@ class KickMomentAnalyzer:
         channel_ref: str,
         max_cuts: int = 1,
         processed_state: Optional[Dict[str, Any]] = None,
+        now_utc: Optional[datetime] = None,
     ) -> List[MomentCluster]:
         slug = extract_kick_slug(channel_ref)
         if not slug:
             return []
+
+        now = now_utc or datetime.now(timezone.utc)
+        recap_hours = max(6, int(getattr(self.cfg, "recap_hours", 36)))
+        cutoff = now - timedelta(hours=recap_hours)
 
         info = self.fetch_channel_info(slug)
         display_name = str((info.get("user") or {}).get("username") or info.get("slug") or slug)
@@ -147,6 +152,8 @@ class KickMomentAnalyzer:
             if dur < min_dur:
                 continue
             c_ts = self._parse_iso(str(clip.get("created_at") or ""))
+            if c_ts is not None and c_ts < cutoff:
+                continue
             if c_ts is not None and any(abs((c_ts - pt).total_seconds()) <= 150.0 for pt in recent_cut_times):
                 continue
 
@@ -223,18 +230,21 @@ class KickMomentAnalyzer:
                 )
                 return clusters
 
-        # 3. Repescagem de VOD recente caso esteja offline e nenhum clipe bateu o piso de views
+        # 3. Repescagem apenas do VOD encerrado mais recente (dentro de `recap_hours`) se offline e sem clipes
         videos = self.fetch_channel_videos(slug)
-        for v in videos[:2]:
+        for v in videos[:3]:
             vod_id = str((v.get("video") or {}).get("uuid") or v.get("uuid") or v.get("id") or "")
             source_m3u8 = str(v.get("source") or "").strip()
             dur_sec = _ms_or_sec_to_seconds(v.get("duration"))
-            if not vod_id or not source_m3u8 or dur_sec < 60.0:
+            if not vod_id or not source_m3u8 or dur_sec < 60.0 or bool(v.get("is_live")):
+                continue
+            v_ts = self._parse_iso(str(v.get("created_at") or ""))
+            if v_ts is not None and v_ts < cutoff:
                 continue
             s_key = f"kick_vod_{vod_id}"
             already_vod = [c for c in (processed_state or {}).get("cuts", []) if c.get("stream_key") == s_key]
             if len(already_vod) >= 2:
-                continue
+                break
 
             slice_idx = len(already_vod) + 1
             anchor = int(dur_sec * (0.35 if slice_idx == 1 else 0.70))
@@ -257,8 +267,8 @@ class KickMomentAnalyzer:
                     mode="kick_vod",
                 )
             )
-            if len(clusters) >= max_cuts:
-                break
+            # Para no primeiro VOD encerrado válido mais recente (evita voltar vários dias atrás)
+            break
 
         return clusters
 

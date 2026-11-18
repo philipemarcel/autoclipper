@@ -15,6 +15,7 @@ class DetectionConfig:
     dedup_overlap_seconds: int = 50
     vod_padding_before_seconds: int = 45
     vod_padding_after_seconds: int = 45
+    recap_hours: int = 36
 
 
 @dataclass

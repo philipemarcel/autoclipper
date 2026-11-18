@@ -98,12 +98,13 @@ class MomentDetector:
                 candidates.extend(filtered)
 
         # ------------------------------------------------------------------
-        # MODO 2: REPESCAGEM PÓS-LIVE (VODs recentes das últimas 36h)
+        # MODO 2: REPESCAGEM PÓS-LIVE (apenas lives mais recentes dentro de `recap_hours`)
         # ------------------------------------------------------------------
         active_stream_id = str(active_stream["id"]) if active_stream else ""
-        cutoff = now - timedelta(hours=36)
+        recap_hours = max(6, int(getattr(self.cfg, "recap_hours", 36)))
+        cutoff = now - timedelta(hours=recap_hours)
 
-        for vod in recent_vods:
+        for vod in recent_vods[:2]:
             vod_stream_id = str(vod.get("stream_id", ""))
             if active_stream_id and vod_stream_id == active_stream_id:
                 # Essa é a live que ainda está ao vivo; já foi tratada no Modo Quente
@@ -158,15 +159,14 @@ class MomentDetector:
             candidates.extend(filtered)
 
         # ------------------------------------------------------------------
-        # MODO 3: PÁGINA DE CLIPES DO CANAL (Top Clipes 7 dias / 24h como referência direta)
-        # Pega clipes em destaque na página da Twitch mesmo quando vod_offset é null ou fora dos VODs acima
+        # MODO 3: PÁGINA DE CLIPES RECENTES DO CANAL (limitado a `recap_hours`, sem puxar clipes antigos de 7 dias)
         # ------------------------------------------------------------------
         try:
             top_page_clips = helix.get_clips_in_window(
                 broadcaster_id=broadcaster_id,
-                started_at_iso=_format_iso_utc(now - timedelta(days=7)),
+                started_at_iso=_format_iso_utc(cutoff),
                 ended_at_iso=_format_iso_utc(now),
-                max_pages=3,
+                max_pages=2,
             )
             if top_page_clips:
                 page_clusters = self.cluster_clips(

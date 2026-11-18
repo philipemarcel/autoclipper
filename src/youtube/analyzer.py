@@ -179,6 +179,7 @@ class YouTubeMomentAnalyzer:
         work_dir: Path,
         time_range_str: str = "",
         processed_state: Optional[Dict[str, Any]] = None,
+        max_age_hours: Optional[int] = None,
     ) -> Tuple[Dict[str, Any], List[MomentCluster]]:
         info = self.fetch_metadata(url, work_dir)
         video_id = str(info.get("id") or hashlib.sha1(url.encode("utf-8")).hexdigest()[:10])
@@ -188,6 +189,16 @@ class YouTubeMomentAnalyzer:
         duration = float(info.get("duration") or 0.0)
 
         user_range = parse_time_range(time_range_str)
+
+        if not is_live and not user_range and max_age_hours is not None:
+            ts = info.get("release_timestamp") or info.get("timestamp")
+            if ts:
+                import time as _time
+
+                age_h = (_time.time() - float(ts)) / 3600.0
+                if age_h > float(max_age_hours):
+                    logger.info("Pulando repescagem YouTube antiga (%.1fh > %dh): %s", age_h, max_age_hours, title)
+                    return info, []
 
         # ------------------------------------------------------------------
         # CASO 1: LIVE DO YOUTUBE EM ANDAMENTO (`is_live=True`)

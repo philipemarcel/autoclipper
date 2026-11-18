@@ -529,6 +529,17 @@ def test_youtube_director_trims_context_and_long_transcript_sampling(monkeypatch
     assert "[45" in sampled  # meio da live (~4500s)
     assert "[67" in sampled or "[68" in sampled  # trecho final da live
 
+    # YouTube auto-repescagem deve ignorar vídeos/VODs mais antigos que `max_age_hours` (36h)
+    yt_an = YouTubeMomentAnalyzer(_make_profile())
+    old_ts = datetime.now(timezone.utc).timestamp() - (72 * 3600)
+    monkeypatch.setattr(
+        yt_an,
+        "fetch_metadata",
+        lambda url, wd: {"id": "yt_old_1", "title": "Live antiga", "is_live": False, "duration": 1800, "timestamp": old_ts},
+    )
+    _, skipped_old = yt_an.discover_moments("https://youtu.be/old", max_cuts=2, work_dir=Path("work_tmp"), max_age_hours=36)
+    assert skipped_old == []
+
     # 2. YouTube (`preserve_full_clip=False`) deve respeitar o corte cirúrgico dentro do buffer
     prof = _make_profile()
     prof.editing.max_duration_seconds = 65.0
@@ -639,24 +650,51 @@ def test_kick_url_parsing_moment_discovery_and_director(monkeypatch):
     assert week_clusters[0].best_clip.id == "k_week_1"
 
     # Clipe bem enquadrado (48s) deve ranquear acima de recorte gigante (180s) com mesmas views e deduplicar <=150s
+    fixed_now = datetime(2026, 11, 18, 20, 0, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
         analyzer,
         "fetch_channel_clips",
         lambda slug, time_window="day", sort="view": [
             {"id": "k_dump", "title": "180s dump", "views": 220, "duration": 180, "created_at": "2026-11-18T19:00:00Z", "clip_url": "https://clips.kick.com/dump.m3u8"},
             {"id": "k_tight", "title": "48s bom", "views": 220, "duration": 48, "created_at": "2026-11-18T18:00:00Z", "clip_url": "https://clips.kick.com/tight.m3u8"},
+            {"id": "k_old_5d", "title": "antigo 5d", "views": 9000, "duration": 45, "created_at": "2026-11-13T18:00:00Z", "clip_url": "https://clips.kick.com/old5d.m3u8"},
         ] if time_window == "day" else [],
     )
-    ranked_both = analyzer.discover_channel_moments("https://kick.com/davyjones", max_cuts=2, processed_state={"cuts": []})
+    ranked_both = analyzer.discover_channel_moments("https://kick.com/davyjones", max_cuts=3, processed_state={"cuts": []}, now_utc=fixed_now)
     assert [c.best_clip.id for c in ranked_both] == ["k_tight", "k_dump"]
 
     ranked = analyzer.discover_channel_moments(
         "https://kick.com/davyjones",
         max_cuts=2,
         processed_state={"cuts": [{"twitch_login": "davyjones", "clip_created_at": "2026-11-18T19:01:00Z"}]},
+        now_utc=fixed_now,
     )
     assert len(ranked) == 1
     assert ranked[0].best_clip.id == "k_tight"
+
+    # Se offline sem clipes elegíveis, repescagem pega apenas VOD recente (<= 36h) e ignora VOD antigo
+    monkeypatch.setattr(analyzer, "fetch_channel_info", lambda slug: {"slug": slug, "user": {"username": "JonVlogs"}, "livestream": None})
+    monkeypatch.setattr(analyzer, "fetch_channel_clips", lambda slug, time_window="day", sort="view": [])
+    monkeypatch.setattr(
+        analyzer,
+        "fetch_channel_videos",
+        lambda slug: [
+            {"id": "vod_old", "uuid": "vod_old", "duration": 3600000, "created_at": "2026-11-14 12:00:00", "source": "https://stream.kick.com/old.m3u8"},
+            {"id": "vod_recent", "uuid": "vod_recent", "duration": 3600000, "created_at": "2026-11-18 10:00:00", "source": "https://stream.kick.com/recent.m3u8"},
+        ],
+    )
+    vod_recap = analyzer.discover_channel_moments("jonvlogs", max_cuts=1, processed_state={"cuts": []}, now_utc=fixed_now)
+    assert len(vod_recap) == 1
+    assert vod_recap[0].mode == "kick_vod"
+    assert "vod_recent" in vod_recap[0].stream_or_vod_key
+
+    # Restaura canal live para teste de `kick_live`
+    monkeypatch.setattr(
+        analyzer,
+        "fetch_channel_info",
+        lambda slug: {"slug": slug, "user": {"username": "JonVlogs"}, "livestream": {"id": 999, "session_title": "IRL"}, "playback_url": "https://stream.kick.com/live.m3u8"},
+    )
+    monkeypatch.setattr(analyzer, "fetch_channel_videos", lambda slug: [])
 
     # Se não há clipes fortes e canal está ao vivo, cai para captura ao vivo HLS (`kick_live`)
     monkeypatch.setattr(analyzer, "fetch_channel_clips", lambda slug, time_window="day", sort="view": [])
