@@ -1,17 +1,12 @@
 /**
- * Cloudflare Worker Gratuito (24/7) — Receptor dos Botões de 1 Clique do Discord
+ * Cloudflare Worker Gratuito (24/7) — Receptor do Discord + Site/Termos/Verificação TikTok Production
  *
- * Responsabilidades:
- *  1. Valida a assinatura criptográfica Ed25519 exigida pelo Discord (`X-Signature-Ed25519`).
- *  2. Responde ao `PING` de verificação do Portal Discord Developer (`type === 1`).
- *  3. Ao clicar em qualquer botão (`Aprovar Fila`, `Postar Agora`, `Só Reels`, `Só TikTok`, `Limpar Música IA`, `Descartar`),
- *     dispara imediatamente o workflow `discord_action.yml` no GitHub Actions e atualiza o status no chat do Discord!
- *
- * Variáveis Secretas no Cloudflare Worker (`npx wrangler secret put ...`):
- *  - DISCORD_PUBLIC_KEY  : Public Key do seu aplicativo no Discord Developer Portal
- *  - GITHUB_PAT          : Fine-grained Personal Access Token com permissão `Actions: Read and write`
- *  - GITHUB_OWNER        : Seu usuário/organização no GitHub
- *  - GITHUB_REPO         : Nome do repositório (ex: `twitch-autocliper`)
+ * Rotas:
+ *  - POST /           : Valida assinatura Ed25519 do Discord e dispara GitHub Actions.
+ *  - GET /            : Página oficial do AutoClipper Studio (Web/Desktop URL do TikTok).
+ *  - GET /terms       : Terms of Service (TikTok Production).
+ *  - GET /privacy     : Privacy Policy (TikTok Production).
+ *  - GET /tiktok*.txt : Arquivo de verificação URL Prefix do TikTok Developers.
  */
 
 function hexToUint8Array(hex) {
@@ -52,10 +47,90 @@ const ACTION_LABELS = {
   reject: "🗑️ Corte descartado.",
 };
 
+function renderHtmlPage(title, heading, bodyHtml) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${title} — AutoClipper Studio</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; max-width: 760px; margin: 48px auto; padding: 0 20px; line-height: 1.6; color: #1f2937; background: #f9fafb; }
+    .card { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    h1 { color: #111827; margin-top: 0; }
+    a { color: #6366f1; }
+    nav { margin-bottom: 24px; font-size: 14px; }
+    nav a { margin-right: 16px; text-decoration: none; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <nav>
+      <a href="/">Home</a>
+      <a href="/terms">Terms of Service</a>
+      <a href="/privacy">Privacy Policy</a>
+    </nav>
+    <h1>${heading}</h1>
+    ${bodyHtml}
+  </div>
+</body>
+</html>`;
+}
+
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    if (request.method === "GET" || request.method === "HEAD") {
+      // 1. Verificação de arquivo `.txt` exigida pelo TikTok Developers (Verify URL prefix)
+      if (env.TIKTOK_VERIFY_FILENAME && env.TIKTOK_VERIFY_CONTENT && path === `/${env.TIKTOK_VERIFY_FILENAME}`) {
+        return new Response(env.TIKTOK_VERIFY_CONTENT, {
+          status: 200,
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        });
+      }
+
+      if (path === "/terms" || path === "/terms/") {
+        const html = renderHtmlPage(
+          "Terms of Service",
+          "Terms of Service",
+          `<p><strong>Effective Date:</strong> November 18, 2026</p>
+           <p>AutoClipper Studio is an automated video clipping, captioning, and publishing tool that connects authorized creator accounts to publish short-form 9:16 livestream highlights via the official TikTok Content Posting API.</p>
+           <p>By authorizing your account through TikTok Login Kit, you confirm that you own or have permission to publish the selected video content and agree to comply with TikTok's Community Guidelines and Terms of Service.</p>
+           <p>You may revoke access at any time in your TikTok account settings. Contact: <a href="https://github.com/philipemarcel/autoclipper">github.com/philipemarcel/autoclipper</a>.</p>`
+        );
+        return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+      }
+
+      if (path === "/privacy" || path === "/privacy/") {
+        const html = renderHtmlPage(
+          "Privacy Policy",
+          "Privacy Policy",
+          `<p><strong>Effective Date:</strong> November 18, 2026</p>
+           <p>AutoClipper Studio respects your privacy. When you authorize your TikTok account via OAuth 2.0, we store only the access and refresh tokens strictly required to upload and publish videos you explicitly approve.</p>
+           <p>We do not sell, rent, or share user data or tokens with third parties. Media files and metadata are stored privately in the creator's own Google Drive.</p>
+           <p>To request deletion of stored tokens, revoke app permissions in TikTok or contact the repository owner at <a href="https://github.com/philipemarcel/autoclipper">github.com/philipemarcel/autoclipper</a>.</p>`
+        );
+        return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+      }
+
+      const homeHtml = renderHtmlPage(
+        "Home",
+        "AutoClipper Studio",
+        `<p>Automated short-form 9:16 video clipping, dynamic captioning, and creator approval studio integrated with TikTok Login Kit and Content Posting API.</p>
+         <ul>
+           <li>Detects high-engagement livestream highlights</li>
+           <li>Formats vertical 9:16 cuts with dynamic word-level captions</li>
+           <li>Publishes creator-approved clips via TikTok Content Posting API</li>
+         </ul>
+         <p>Source &amp; Documentation: <a href="https://github.com/philipemarcel/autoclipper">github.com/philipemarcel/autoclipper</a></p>`
+      );
+      return new Response(homeHtml, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+
     if (request.method !== "POST") {
-      return new Response("Twitch AutoClipper Discord Worker Online.", { status: 200 });
+      return new Response("Method Not Allowed", { status: 405 });
     }
 
     const bodyText = await request.text();
@@ -105,7 +180,6 @@ export default {
       const statusLine = ACTION_LABELS[action] || `Processando ${action}...`;
       const prevContent = interaction.message?.content || "";
 
-      // `type: 7` atualiza a mensagem original desativando os botões já clicados (evita clique duplo)
       return Response.json({
         type: 7,
         data: {
