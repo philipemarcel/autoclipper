@@ -11,13 +11,18 @@ from nacl import encoding, public
 from src.config_loader import load_environment
 
 SECRET_KEYS = [
+    "AUTOCLIPPER_PROFILES_JSON",
     "TWITCH_CLIENT_ID",
     "TWITCH_CLIENT_SECRET",
     "GEMINI_API_KEY",
     "GROQ_API_KEY",
     "GDRIVE_TOKEN_JSON",
+    "GDRIVE_ROOT_FOLDER_NAME",
     "DISCORD_BOT_TOKEN",
     "DISCORD_CHANNEL_ID",
+    "DISCORD_RELAY_URL",
+    "DISCORD_RELAY_TOKEN",
+    "DISCORD_RELAY_TENANT",
     "IG_ACCOUNT_ID",
     "IG_ACCESS_TOKEN",
     "TIKTOK_CLIENT_KEY",
@@ -50,8 +55,8 @@ def encrypt_secret(public_key_b64: str, secret_value: str) -> str:
 def main() -> None:
     load_environment()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--owner", default="philipemarcel")
-    parser.add_argument("--repo", default="autoclipper")
+    parser.add_argument("--owner", default=os.getenv("GITHUB_OWNER", "philipemarcel"))
+    parser.add_argument("--repo", default=os.getenv("GITHUB_REPO", "autoclipper"))
     parser.add_argument("--token", required=True)
     args = parser.parse_args()
 

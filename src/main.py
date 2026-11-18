@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import time
 from datetime import datetime, timezone
@@ -113,7 +114,7 @@ def process_single_cluster(
         copy_path = cut_work_dir / "copy.txt"
         copy_path.write_text(decision.full_social_copy, encoding="utf-8")
 
-        creator_slug = cluster.broadcaster_login or profile.twitch_login
+        creator_slug = cluster.broadcaster_login or profile.twitch_login or profile.id
         date_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         stream_folder = f"{date_prefix}_{cluster.stream_or_vod_key}"
         anchor_label = f"vod{cluster.peak_offset}s" if cluster.peak_offset is not None else "clip"
@@ -191,7 +192,19 @@ def process_single_cluster(
         shutil.rmtree(cut_work_dir, ignore_errors=True)
 
 
+def _is_unconfigured_ci() -> bool:
+    return (
+        os.getenv("GITHUB_ACTIONS", "").lower() == "true"
+        and not os.getenv("GDRIVE_TOKEN_JSON", "").strip()
+        and not os.getenv("GDRIVE_MOUNT_PATH", "").strip()
+    )
+
+
 def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[int] = None) -> int:
+    if _is_unconfigured_ci():
+        logger.info("Aguardando configuração inicial (`/setup iniciar` no Discord ou GDRIVE_TOKEN_JSON nos Secrets).")
+        return 0
+
     profiles = load_profiles(only_enabled=True)
     if profile_filter:
         profiles = [p for p in profiles if p.id == profile_filter or p.twitch_login == profile_filter.lower()]
@@ -199,15 +212,27 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
         logger.warning("Nenhum perfil habilitado encontrado para monitorar.")
         return 0
 
-    # Ignora placeholder inicial antes de o usuário preencher o nome do streamer
-    active_profiles = [p for p in profiles if p.twitch_login not in {"seu_criador_aqui", ""}]
+    active_profiles = [
+        p
+        for p in profiles
+        if (p.twitch_login not in {"seu_criador_aqui", ""}) or bool(p.youtube_channels) or bool(p.kick_channels)
+    ]
     if not active_profiles:
         logger.warning(
-            "Configure `twitch_login` em `config/profiles.yaml` com o login real do criador na Twitch."
+            "Nenhum canal configurado (Twitch/YouTube/Kick). Use `/canais adicionar` no Discord ou `config/profiles.yaml`."
         )
         return 0
 
-    helix = TwitchHelixClient()
+    has_twitch_target = any(p.twitch_login not in {"seu_criador_aqui", ""} for p in active_profiles)
+    helix: Optional[TwitchHelixClient] = None
+    if has_twitch_target:
+        if os.getenv("TWITCH_CLIENT_ID", "").strip() and os.getenv("TWITCH_CLIENT_SECRET", "").strip():
+            helix = TwitchHelixClient()
+        else:
+            logger.warning(
+                "Canal Twitch configurado, mas TWITCH_CLIENT_ID/SECRET estão ausentes. Pulando Twitch e mantendo YouTube/Kick."
+            )
+
     store = DriveStore()
     theme = load_subtitle_theme()
     processed_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
@@ -218,21 +243,22 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
         if max_cuts_override is not None:
             prof.detection.max_cuts_per_run = max_cuts_override
 
-        detector = MomentDetector(prof)
-        candidates = detector.discover_candidates(helix, processed_state)
-        logger.info(
-            "Perfil `%s` (@%s): %d momento(s) candidato(s) encontrado(s).",
-            prof.id,
-            prof.twitch_login,
-            len(candidates),
-        )
+        if helix is not None and prof.twitch_login not in {"seu_criador_aqui", ""}:
+            detector = MomentDetector(prof)
+            candidates = detector.discover_candidates(helix, processed_state)
+            logger.info(
+                "Perfil `%s` (@%s): %d momento(s) candidato(s) encontrado(s).",
+                prof.id,
+                prof.twitch_login,
+                len(candidates),
+            )
 
-        for cluster in candidates:
-            try:
-                process_single_cluster(prof, cluster, store, theme, processed_state, work_root)
-                total_created += 1
-            except Exception as exc:
-                logger.exception("Erro ao processar cluster %s: %s", cluster.cluster_id, exc)
+            for cluster in candidates:
+                try:
+                    process_single_cluster(prof, cluster, store, theme, processed_state, work_root)
+                    total_created += 1
+                except Exception as exc:
+                    logger.exception("Erro ao processar cluster %s: %s", cluster.cluster_id, exc)
 
         # Monitoramento automático 24/7 dos canais do YouTube configurados no perfil (vídeos novos + lives + repescagem)
         # Garante cota justa de 1 corte novo por canal antes de encerrar, evitando que o 1º canal consuma toda a cota.
@@ -466,6 +492,16 @@ def cmd_discord_action(
         cmd_youtube(url=youtube_url.strip(), max_cuts=max_cuts, time_range=time_range)
         return
 
+    if action == "cleanup":
+        deleted = cmd_cleanup()
+        default_prof = next(iter(load_profiles(only_enabled=False)), None)
+        if default_prof:
+            DiscordNotifier(default_prof).post_status_reply(
+                discord_message_id,
+                f"🧹 Limpeza concluída no Google Drive: `{deleted}` corte(s) expirado(s) removido(s).",
+            )
+        return
+
     store = DriveStore()
     profiles = {p.id: p for p in load_profiles(only_enabled=False)}
 
@@ -500,9 +536,9 @@ def cmd_discord_action(
     if not cut_dict:
         raise RuntimeError(f"Corte `{cut_id}` não encontrado em {PROCESSED_STATE_FILE}.")
 
-    profile = profiles.get(cut_dict["profile_id"])
+    profile = profiles.get(cut_dict["profile_id"]) or next(iter(profiles.values()), None)
     if not profile:
-        raise RuntimeError(f"Perfil `{cut_dict['profile_id']}` não encontrado em profiles.yaml.")
+        raise RuntimeError(f"Perfil `{cut_dict['profile_id']}` não encontrado na configuração.")
 
     notifier = DiscordNotifier(profile)
     msg_ref = discord_message_id or str(cut_dict.get("discord_message_id", ""))
@@ -593,6 +629,9 @@ def cmd_discord_action(
 
 
 def cmd_drip_publish() -> int:
+    if _is_unconfigured_ci():
+        logger.info("Aguardando configuração inicial (`/setup iniciar` ou GDRIVE_TOKEN_JSON nos Secrets).")
+        return 0
     store = DriveStore()
     profiles = {p.id: p for p in load_profiles(only_enabled=False)}
     processed_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})

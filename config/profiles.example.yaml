@@ -1,0 +1,67 @@
+# ==============================================================================
+# Open Template Config — AutoClipper 24/7 (Modelo C)
+# Voce nao precisa editar este arquivo na mao se usar o Bot do Discord separado
+# (`/setup iniciar`, `/canais adicionar`, `/fila`): o bot sincroniza tudo via
+# segredo `AUTOCLIPPER_PROFILES_JSON` direto no seu GitHub!
+# Se quiser usar via YAML manual, renomeie para `config/profiles.yaml`.
+# ==============================================================================
+profiles:
+  - id: "perfil_01"
+    enabled: true
+    # Preencha com o login do streamer na Twitch, ou deixe "" se usar so YouTube/Kick
+    twitch_login: ""
+    display_name: "Meu Canal de Cortes"
+    language: "pt"
+
+    youtube_channels: []
+    kick_channels: []
+
+    detection:
+      cluster_window_seconds: 75
+      min_clips_live_cluster: 3
+      min_views_single_clip_live: 80
+      min_views_post_live: 120
+      max_cuts_per_stream: 15
+      max_cuts_per_run: 4
+      dedup_overlap_seconds: 50
+      vod_padding_before_seconds: 45
+      vod_padding_after_seconds: 45
+      recap_hours: 36
+
+    editing:
+      max_duration_seconds: 58.0
+      min_duration_seconds: 16.0
+      cold_open_enabled: true
+      cold_open_min_main_duration: 22.0
+      cold_open_min_seconds: 2.0
+      cold_open_max_seconds: 3.2
+      layout_mode: "auto"
+      watermark_text: ""
+
+    copy:
+      style: "minimal_meme"
+      max_hashtags: 5
+      base_hashtags:
+        - "#cortes"
+        - "#games"
+        - "#viral"
+
+    discord:
+      bot_token_env: "DISCORD_BOT_TOKEN"
+      channel_id_env: "DISCORD_CHANNEL_ID"
+
+    publishing:
+      drip_interval_minutes: 75
+      quiet_hours_brt: [3, 9]
+      timezone: "America/Sao_Paulo"
+      drive_retention_days: 10
+      instagram:
+        enabled: true
+        account_id_env: "IG_ACCOUNT_ID"
+        access_token_env: "IG_ACCESS_TOKEN"
+      tiktok:
+        enabled: true
+        mode: "inbox"
+        privacy_level: "PUBLIC_TO_EVERYONE"
+        fallback_to_inbox: true
+        access_token_env: "TIKTOK_ACCESS_TOKEN"

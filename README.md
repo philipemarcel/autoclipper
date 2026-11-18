@@ -27,4 +27,4 @@ python -m src.main discord-action --action clean_audio --cut-id <ID_DO_CORTE>
 pytest -v
 ```
 
-Consulte o passo a passo completo das chaves e deploy em [SETUP_GUIDE.md](SETUP_GUIDE.md) e o motor GPU em [colab/Twitch_AutoClipper_Ultra_GPU.ipynb](colab/Twitch_AutoClipper_Ultra_GPU.ipynb).
+Consulte o passo a passo completo das chaves e deploy em [SETUP_GUIDE.md](SETUP_GUIDE.md), o motor GPU em [colab/Twitch_AutoClipper_Ultra_GPU.ipynb](colab/Twitch_AutoClipper_Ultra_GPU.ipynb) e o modelo base para forks/multi-usuário em [config/profiles.example.yaml](config/profiles.example.yaml) integrado ao projeto separado `autoclipper-discord-bot` (BYO Drive/Redes/IA/GitHub direto pelo Discord).

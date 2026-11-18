@@ -11,11 +11,12 @@ import base64
 import hashlib
 import http.server
 import json
+import os
 import secrets
 import urllib.parse
 import requests
 
-DEFAULT_REDIRECT_URI = "https://github.com/philipemarcel/autoclipper"
+DEFAULT_REDIRECT_URI = os.getenv("AUTOCLIPPER_REDIRECT_URI", "https://github.com/philipemarcel/autoclipper")
 SCOPES = "user.info.basic,video.upload,video.publish"
 
 

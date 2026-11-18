@@ -42,6 +42,8 @@ class CopyConfig:
 class DiscordProfileConfig:
     bot_token_env: str = "DISCORD_BOT_TOKEN"
     channel_id_env: str = "DISCORD_CHANNEL_ID"
+    channel_id: str = ""
+    relay_tenant: str = ""
 
 
 @dataclass

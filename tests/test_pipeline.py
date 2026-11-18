@@ -876,3 +876,106 @@ def test_drip_timer_override_and_discord_select_menu(tmp_path: Path):
     assert "Fila 20m" in rows[0]["components"][0]["label"]
     assert rows[2]["components"][0]["custom_id"] == "set_timer:cut_a"
     assert "atual: 20m" in rows[2]["components"][0]["placeholder"]
+
+
+def test_multitenant_env_profiles_relay_and_ci_guard(tmp_path: Path, monkeypatch):
+    from src.approval.discord_notifier import DiscordNotifier
+    from src.config_loader import load_profiles
+    from src.main import cmd_watch
+
+    payload = {
+        "profiles": [
+            {
+                "id": "perfil_01",
+                "twitch_login": "",
+                "display_name": "Cortes do Joao",
+                "kick_channels": ["davyjones"],
+                "discord": {"channel_id": "999888", "relay_tenant": "ch:999888"},
+                "publishing": {"drip_interval_minutes": 45, "quiet_hours_brt": []},
+            }
+        ]
+    }
+    monkeypatch.setenv("AUTOCLIPPER_PROFILES_JSON", json.dumps(payload))
+    profs = load_profiles(only_enabled=True)
+    assert len(profs) == 1
+    assert profs[0].twitch_login == ""
+    assert profs[0].kick_channels == ["davyjones"]
+    assert profs[0].discord.channel_id == "999888"
+    assert profs[0].discord.relay_tenant == "ch:999888"
+
+    # DiscordNotifier em modo Relay envia para /send e /reply com X-Relay-Tenant sem vazar BOT_TOKEN
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "")
+    monkeypatch.setenv("DISCORD_CHANNEL_ID", "")
+    monkeypatch.setenv("DISCORD_RELAY_URL", "https://bot.example.workers.dev/api/relay")
+    monkeypatch.setenv("DISCORD_RELAY_TOKEN", "relay_tok_123")
+
+    calls = []
+
+    class FakeResp:
+        ok = True
+        status_code = 200
+        text = "{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"id": "msg_relay_42"}
+
+    def fake_post(url, headers=None, data=None, files=None, json=None, timeout=None):
+        calls.append({"url": url, "headers": headers or {}, "json": json, "has_files": bool(files)})
+        return FakeResp()
+
+    monkeypatch.setattr("src.approval.discord_notifier.requests.post", fake_post)
+    notifier = DiscordNotifier(profs[0])
+    assert notifier.use_relay is True
+    assert notifier.is_configured is True
+
+    dummy_mp4 = tmp_path / "prev.mp4"
+    dummy_mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    rec = CutRecord(
+        cut_id="cut_rel_1",
+        profile_id="perfil_01",
+        twitch_login="davyjones",
+        stream_key="kick_1",
+        mode="kick_clip",
+        score=95.0,
+        source_type="kick_clip",
+        video_id="k1",
+        vod_anchor_sec=None,
+        clip_urls=[],
+        caption="Teste relay!",
+        teaser_headline="",
+        total_duration=25.0,
+        layout_used="split_screen",
+        drive_folder_id="f1",
+        drive_folder_url="https://drive.google.com/f1",
+        master_file_id="m1",
+        master_file_url="https://drive.google.com/m1",
+        clean_file_id="c1",
+        srt_file_id="s1",
+        created_at="2026-11-18T18:00:00Z",
+    )
+    msg_id = notifier.send_cut_for_approval(rec, dummy_mp4)
+    assert msg_id == "msg_relay_42"
+    notifier.post_status_reply("msg_relay_42", "Publicado!")
+
+    assert calls[0]["url"] == "https://bot.example.workers.dev/api/relay/send"
+    assert calls[0]["headers"]["Authorization"] == "Bearer relay_tok_123"
+    assert calls[0]["headers"]["X-Relay-Tenant"] == "ch:999888"
+    assert calls[0]["has_files"] is True
+    assert calls[1]["url"] == "https://bot.example.workers.dev/api/relay/reply"
+
+    # Fresh Open Template fork em GitHub Actions sem GDRIVE_TOKEN_JSON sai limpo (codigo 0)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GDRIVE_TOKEN_JSON", "")
+    monkeypatch.setenv("GDRIVE_MOUNT_PATH", "")
+    assert cmd_watch() == 0
+
+    # Perfil somente Kick (twitch_login vazio) nao falha mesmo sem TWITCH_CLIENT_ID
+    monkeypatch.setenv("GITHUB_ACTIONS", "false")
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "")
+    monkeypatch.setenv("TWITCH_CLIENT_SECRET", "")
+    monkeypatch.setenv("GDRIVE_MOUNT_PATH", str(tmp_path / "mirror_watch"))
+    monkeypatch.setattr("src.kick.analyzer.KickMomentAnalyzer.discover_channel_moments", lambda *a, **kw: [])
+    assert cmd_watch() == 0

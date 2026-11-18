@@ -28,14 +28,33 @@ class DiscordNotifier:
         profile: ProfileConfig,
         bot_token: Optional[str] = None,
         channel_id: Optional[str] = None,
+        relay_url: Optional[str] = None,
+        relay_token: Optional[str] = None,
+        relay_tenant: Optional[str] = None,
     ) -> None:
         self.profile = profile
         self.bot_token = (bot_token or get_env_secret(profile.discord.bot_token_env, required=False)).strip()
-        self.channel_id = (channel_id or get_env_secret(profile.discord.channel_id_env, required=False)).strip()
+        self.channel_id = (
+            channel_id
+            or getattr(profile.discord, "channel_id", "")
+            or get_env_secret(profile.discord.channel_id_env, required=False)
+        ).strip()
+        self.relay_url = (relay_url or get_env_secret("DISCORD_RELAY_URL", required=False)).strip().rstrip("/")
+        self.relay_token = (relay_token or get_env_secret("DISCORD_RELAY_TOKEN", required=False)).strip()
+        self.relay_tenant = (
+            relay_tenant
+            or getattr(profile.discord, "relay_tenant", "")
+            or get_env_secret("DISCORD_RELAY_TENANT", required=False)
+            or (f"ch:{self.channel_id}" if self.channel_id else "")
+        ).strip()
+
+    @property
+    def use_relay(self) -> bool:
+        return bool(self.relay_url and self.relay_token and self.relay_tenant)
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.bot_token and self.channel_id)
+        return bool((self.bot_token and self.channel_id) or self.use_relay)
 
     def send_cut_for_approval(
         self,
@@ -44,11 +63,18 @@ class DiscordNotifier:
         drip_interval_override: Optional[int] = None,
     ) -> str:
         if not self.is_configured:
-            logger.warning("Discord não configurado (DISCORD_BOT_TOKEN/DISCORD_CHANNEL_ID ausentes). Pulando envio.")
+            logger.warning("Discord não configurado (BOT_TOKEN/CHANNEL_ID ou RELAY ausentes). Pulando envio.")
             return ""
 
-        url = f"{DISCORD_API_BASE}/channels/{self.channel_id}/messages"
-        headers = {"Authorization": f"Bot {self.bot_token}"}
+        if self.use_relay:
+            url = f"{self.relay_url}/send"
+            headers = {
+                "Authorization": f"Bearer {self.relay_token}",
+                "X-Relay-Tenant": self.relay_tenant,
+            }
+        else:
+            url = f"{DISCORD_API_BASE}/channels/{self.channel_id}/messages"
+            headers = {"Authorization": f"Bot {self.bot_token}"}
 
         if cut.mode == "youtube_live":
             mode_badge = "🔴 YOUTUBE LIVE"
@@ -135,14 +161,25 @@ class DiscordNotifier:
     def post_status_reply(self, reply_to_message_id: str, text: str) -> None:
         if not self.is_configured:
             return
-        url = f"{DISCORD_API_BASE}/channels/{self.channel_id}/messages"
-        headers = {
-            "Authorization": f"Bot {self.bot_token}",
-            "Content-Type": "application/json",
-        }
-        body: Dict[str, Any] = {"content": text}
-        if reply_to_message_id:
-            body["message_reference"] = {"message_id": reply_to_message_id, "fail_if_not_exists": False}
+        if self.use_relay:
+            url = f"{self.relay_url}/reply"
+            headers = {
+                "Authorization": f"Bearer {self.relay_token}",
+                "X-Relay-Tenant": self.relay_tenant,
+                "Content-Type": "application/json",
+            }
+            body: Dict[str, Any] = {"content": text}
+            if reply_to_message_id:
+                body["reply_to_message_id"] = reply_to_message_id
+        else:
+            url = f"{DISCORD_API_BASE}/channels/{self.channel_id}/messages"
+            headers = {
+                "Authorization": f"Bot {self.bot_token}",
+                "Content-Type": "application/json",
+            }
+            body = {"content": text}
+            if reply_to_message_id:
+                body["message_reference"] = {"message_id": reply_to_message_id, "fail_if_not_exists": False}
         resp = requests.post(url, headers=headers, json=body, timeout=25)
         if not resp.ok:
             logger.warning("Falha ao enviar status no Discord: %s", resp.text)

@@ -30,13 +30,11 @@ def load_environment(env_path: Optional[Path] = None) -> None:
         load_dotenv(override=False)
 
 
-def load_profiles(config_path: Optional[Path] = None, only_enabled: bool = True) -> List[ProfileConfig]:
-    path = config_path or (PROJECT_ROOT / "config" / "profiles.yaml")
-    with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-
+def _parse_profiles_data(raw: Any, only_enabled: bool = True) -> List[ProfileConfig]:
+    """Converte estrutura dict/list (YAML ou JSON do Discord Bot) em objetos ProfileConfig."""
+    items = raw if isinstance(raw, list) else (raw or {}).get("profiles", [])
     profiles: List[ProfileConfig] = []
-    for item in raw.get("profiles", []):
+    for item in items:
         det_raw = item.get("detection", {}) or {}
         edt_raw = item.get("editing", {}) or {}
         cpy_raw = item.get("copy", {}) or {}
@@ -45,14 +43,19 @@ def load_profiles(config_path: Optional[Path] = None, only_enabled: bool = True)
         ig_raw = pub_raw.get("instagram", {}) or {}
         tt_raw = pub_raw.get("tiktok", {}) or {}
 
+        twitch_login = str(item.get("twitch_login") or "").strip().lower()
+        kick_list = [str(u).strip() for u in (item.get("kick_channels") or []) if str(u).strip()]
+        yt_list = [str(u).strip() for u in (item.get("youtube_channels") or []) if str(u).strip()]
+        fallback_name = twitch_login or (kick_list[0] if kick_list else str(item.get("id", "AutoClipper")))
+
         prof = ProfileConfig(
-            id=str(item["id"]),
-            twitch_login=str(item["twitch_login"]).strip().lower(),
-            display_name=str(item.get("display_name") or item["twitch_login"]),
+            id=str(item.get("id") or f"perfil_{len(profiles) + 1:02d}"),
+            twitch_login=twitch_login,
+            display_name=str(item.get("display_name") or fallback_name),
             enabled=bool(item.get("enabled", True)),
             language=str(item.get("language", "pt")),
-            youtube_channels=[str(u).strip() for u in (item.get("youtube_channels") or []) if str(u).strip()],
-            kick_channels=[str(u).strip() for u in (item.get("kick_channels") or []) if str(u).strip()],
+            youtube_channels=yt_list,
+            kick_channels=kick_list,
             detection=DetectionConfig(**det_raw),
             editing=EditingConfig(**edt_raw),
             copy=CopyConfig(**cpy_raw),
@@ -69,6 +72,31 @@ def load_profiles(config_path: Optional[Path] = None, only_enabled: bool = True)
         if not only_enabled or prof.enabled:
             profiles.append(prof)
     return profiles
+
+
+def load_profiles(config_path: Optional[Path] = None, only_enabled: bool = True) -> List[ProfileConfig]:
+    """
+    Carrega perfis na ordem de prioridade:
+      1. `AUTOCLIPPER_PROFILES_JSON` (injetado pelo Bot Discord multi-usuario) se definido e sem `config_path` explícito.
+      2. `config_path` explícito ou `config/profiles.yaml`.
+      3. Fallback para `config/profiles.example.yaml` (Open Template / Modelo C).
+    """
+    env_profiles_json = os.getenv("AUTOCLIPPER_PROFILES_JSON", "").strip()
+    if config_path is None and env_profiles_json:
+        raw_json = json.loads(env_profiles_json)
+        return _parse_profiles_data(raw_json, only_enabled=only_enabled)
+
+    if config_path is not None:
+        path = config_path
+    else:
+        primary = PROJECT_ROOT / "config" / "profiles.yaml"
+        example = PROJECT_ROOT / "config" / "profiles.example.yaml"
+        path = primary if primary.exists() else example
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+
+    return _parse_profiles_data(raw, only_enabled=only_enabled)
 
 
 def load_subtitle_theme(theme_path: Optional[Path] = None) -> Dict[str, Any]:
