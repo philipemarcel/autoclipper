@@ -16,8 +16,9 @@ profiles:
       - "https://www.youtube.com/@Gameplayrj"
       - "https://www.youtube.com/@PaulinhoLOKOoficial"
     # Canais da Kick monitorados 24/7 (clipes em alta + lives ao vivo + repescagem de VODs)
-    # Adicione slugs ou URLs completas aqui (ex: "https://kick.com/seucanal"):
-    kick_channels: []
+    kick_channels:
+      - "https://kick.com/davyjones"
+      - "https://kick.com/bistecone"
 
     detection:
       # Agrupa múltiplos clipes criados pela comunidade na mesma janela temporal (segundos)
