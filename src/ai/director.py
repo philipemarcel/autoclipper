@@ -152,6 +152,19 @@ class GeminiDirector:
 
         live_trends = fetch_brazil_realtime_trends(limit=15)
         trends_hint = ", ".join(live_trends) if live_trends else "(indisponível no momento)"
+        peak_line = (
+            f"~{peak_hint_sec:.1f}s"
+            if peak_hint_sec > 0
+            else "Desconhecido — analise TODA a transcrição (0s até o fim) e escolha o trecho mais intenso/engraçado!"
+        )
+        cold_open_section = (
+            f"""2. COLD OPEN / TEASER (`cold_open_enabled`, `teaser_start`, `teaser_end`):
+   - Se o corte principal tiver pelo menos {edt.cold_open_min_main_duration:.0f}s e o clímax não estiver já nos primeiros 5s, ative `cold_open_enabled = true`.
+   - Escolha os {edt.cold_open_min_seconds:.1f}s a {edt.cold_open_max_seconds:.1f}s mais explosivos/engraçados do clímax dentro da janela para aparecerem no segundo 00:00."""
+            if edt.cold_open_enabled
+            else """2. COLD OPEN DESATIVADO (`cold_open_enabled: false`, `teaser_start: 0.0`, `teaser_end: 0.0`):
+   - NÃO reserve segundos para teaser; use até o teto máximo inteiro no corte principal (`main_start` a `main_end`)."""
+        )
 
         return f"""
 Você é um editor sênior de páginas virais brasileiras de cortes de lives no TikTok e Instagram Reels.
@@ -163,22 +176,21 @@ DADOS DO MOMENTO ({platform_label}):
 - Títulos/temas deste momento: {json.dumps(clip_titles, ensure_ascii=False)}
 - Assuntos EM ALTA AGORA NO BRASIL (Google Trends tempo real): {trends_hint}
 - Duração total do vídeo bruto extraído: {raw_duration_sec:.2f}s
-- Ponto principal aproximado: ~{peak_hint_sec:.1f}s
+- Ponto principal aproximado: {peak_line}
 
 TRANSCRIÇÃO COM TIMESTAMPS:
 {transcript_block}
 
 REGRAS OBRIGATÓRIAS DE EDIÇÃO:
 1. CORTE PRINCIPAL (`main_start` e `main_end`):
-   - {"Use o vídeo bruto acima como BUFFER DE CONTEXTO para encontrar o INÍCIO REAL da conversa/situação (antes do clímax em ~" + f"{peak_hint_sec:.0f}s" + ") e o DESFECHO COMPLETO após a reação." if is_external_stream else "Remova silêncios, enrolação ou fim de assuntos anteriores."}
+   - {"Use o vídeo bruto acima como BUFFER DE CONTEXTO para encontrar o INÍCIO REAL da conversa/situação (antes do clímax) e o DESFECHO COMPLETO após a reação." if is_external_stream else "Remova silêncios, enrolação ou fim de assuntos anteriores."}
    - Comece exatamente na frase de contexto/gancho que prepara o momento (`main_start`) e termine só após toda a reação/risada/desfecho final (`main_end` — deixe sempre +1.5s a +3s de respiro após a última fala).
    - {"NÃO comece o corte no meio de uma frase ou já com o assunto terminando; e se o assunto mudar para leitura de chat/doações ou caminhada sem relação, ENCERRE `main_end` antes dessa quebra (melhor 30–50s coesos do que 60s com assunto desconexo!)." if is_external_stream else ""}
-   - {"ATENÇÃO (Clipe longo da Kick > 65s): o clipe original tem " + f"{raw_duration_sec:.1f}s" + " porque quem clipou incluiu a reação até o final! Prefira manter a janela final completa até ~" + f"{raw_duration_sec:.1f}s" + " (aproveitando de 45s a " + f"{edt.max_duration_seconds:.0f}s" + ") em vez de encerrar cedo aos 17s–30s." if cluster.mode == "kick_clip" and raw_duration_sec > max(65.0, edt.max_duration_seconds) else ""}
-   - A soma final (`teaser` + `corte principal`) NUNCA pode passar de {edt.max_duration_seconds:.1f} segundos (se usar teaser de ~2.8s, o corte principal deve ter no máximo ~55.0s).
+   - {"ATENÇÃO (Clipe Kick 66s–115s): o clipe original tem " + f"{raw_duration_sec:.1f}s" + " e normalmente termina na reação principal! Prefira encerrar perto de ~" + f"{raw_duration_sec:.1f}s" + " aproveitando 45s–" + f"{edt.max_duration_seconds:.0f}s" + "." if cluster.mode == "kick_clip" and max(65.0, edt.max_duration_seconds) < raw_duration_sec <= 115.0 else ""}
+   - {"ATENÇÃO (Clipe Kick longo > 115s): este arquivo de " + f"{raw_duration_sec:.0f}s" + " pode ter mais de uma cena ou espera longa! Analise do início (0s) ao fim e selecione a CENA MAIS ENGRAÇADA/FORTE completa (35s–" + f"{edt.max_duration_seconds:.0f}s" + "), começando na preparação e terminando só depois do clímax/reação (evite escolher trechos mortos entre cenas!)." if cluster.mode == "kick_clip" and raw_duration_sec > 115.0 else ""}
+   - A soma final (`teaser` + `corte principal`) NUNCA pode passar de {edt.max_duration_seconds:.1f} segundos.
    - Mínimo desejado: {edt.min_duration_seconds:.1f}s (a menos que o vídeo bruto inteiro seja menor).
-2. COLD OPEN / TEASER (`cold_open_enabled`, `teaser_start`, `teaser_end`):
-   - Se o corte principal tiver pelo menos {edt.cold_open_min_main_duration:.0f}s e o clímax não estiver já nos primeiros 5s, ative `cold_open_enabled = true`.
-   - Escolha os {edt.cold_open_min_seconds:.1f}s a {edt.cold_open_max_seconds:.1f}s mais explosivos/engraçados do clímax dentro da janela para aparecerem no segundo 00:00.
+{cold_open_section}
 3. HEADLINE DO TEASER (`teaser_headline`):
    - Máximo 4 a 5 palavras curtas que aparecem na tela nos 2-3s iniciais.
    - Baseie-se LITERALMENTE no título/assunto do momento (`{cluster.dominant_title}`) ou na frase mais engraçada dita na transcrição.
@@ -302,17 +314,27 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             if (raw_duration_sec - main_end) <= 3.5 and (raw_duration_sec - main_start) <= max_total:
                 main_end = raw_duration_sec
 
-            # Para clipes longos da Kick (> 65s): evita encerrar o clipe cedo aos 17s-30s amputando o final
+            # Para clipes longos da Kick (> 65s):
+            # - Até 115s (clipes de ~90s): protege o final da reação evitando cortar aos 17s.
+            # - Acima de 115s (clipes de ~180s): puxa a preparação para trás antes de alongar para frente, evitando tela morta pós-morte.
             if prefer_clip_ending and raw_duration_sec > max_total:
-                if raw_duration_sec <= 115.0 and (raw_duration_sec - main_end) <= 22.0:
-                    main_end = raw_duration_sec
-                    if (main_end - main_start) > max_total:
-                        main_start = max(0.0, main_end - max_total)
-                if (main_end - main_start) < min(50.0, max_total):
-                    desired = min(max_total, raw_duration_sec - main_start)
-                    main_end = min(raw_duration_sec, max(main_end, main_start + desired))
+                if raw_duration_sec <= 115.0:
+                    if (raw_duration_sec - main_end) <= 22.0:
+                        main_end = raw_duration_sec
+                        if (main_end - main_start) > max_total:
+                            main_start = max(0.0, main_end - max_total)
                     if (main_end - main_start) < min(50.0, max_total):
-                        main_start = max(0.0, main_end - min(max_total, raw_duration_sec))
+                        desired = min(max_total, raw_duration_sec - main_start)
+                        main_end = min(raw_duration_sec, max(main_end, main_start + desired))
+                        if (main_end - main_start) < min(50.0, max_total):
+                            main_start = max(0.0, main_end - min(max_total, raw_duration_sec))
+                elif (main_end - main_start) < min(36.0, max_total):
+                    deficit = min(46.0, max_total) - (main_end - main_start)
+                    shift_back = min(main_start, deficit)
+                    main_start -= shift_back
+                    rem = deficit - shift_back
+                    if rem > 0:
+                        main_end = min(raw_duration_sec, main_end + rem)
 
         cold_open = bool(raw.get("cold_open_enabled", True)) and edt.cold_open_enabled
         teaser_start = float(raw.get("teaser_start", 0.0))

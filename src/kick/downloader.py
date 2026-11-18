@@ -32,11 +32,13 @@ class KickDownloader:
             logger.info("Baixando clipe da Kick: %s", stream_url)
             self._download_hls_or_ytdlp(ffmpeg_bin, stream_url, page_url, out_path)
             dur = probe_video_duration(out_path)
+            # Para clipes longos (>65s), não envia dica falsa do meio (dur*0.55) para não induzir o Diretor a cortar no meio morto
+            peak_hint = (dur * 0.55) if dur <= 65.0 else -1.0
             return DownloadedRawMedia(
                 video_path=out_path,
                 source_type="kick_clip" if dur <= 65.0 else "kick_vod",
                 slice_start_in_vod=0,
-                peak_Hint_sec_in_file=dur * 0.55,
+                peak_Hint_sec_in_file=peak_hint,
                 duration_sec=dur,
             )
 

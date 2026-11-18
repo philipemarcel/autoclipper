@@ -166,6 +166,8 @@ def process_single_cluster(
         }
         meta_dict["drive_parts"] = drive_parts
         meta_dict["clip_ids"] = [c.id for c in cluster.clips]
+        if cluster.best_clip.created_at:
+            meta_dict["clip_created_at"] = cluster.best_clip.created_at
         meta_path.write_text(json.dumps(meta_dict, ensure_ascii=False, indent=2), encoding="utf-8")
         store.upload_file(meta_path, drive_parts, "metadata.json")
 

@@ -638,6 +638,26 @@ def test_kick_url_parsing_moment_discovery_and_director(monkeypatch):
     assert len(week_clusters) == 1
     assert week_clusters[0].best_clip.id == "k_week_1"
 
+    # Clipe bem enquadrado (48s) deve ranquear acima de recorte gigante (180s) com mesmas views e deduplicar <=150s
+    monkeypatch.setattr(
+        analyzer,
+        "fetch_channel_clips",
+        lambda slug, time_window="day", sort="view": [
+            {"id": "k_dump", "title": "180s dump", "views": 220, "duration": 180, "created_at": "2026-11-18T19:00:00Z", "clip_url": "https://clips.kick.com/dump.m3u8"},
+            {"id": "k_tight", "title": "48s bom", "views": 220, "duration": 48, "created_at": "2026-11-18T18:00:00Z", "clip_url": "https://clips.kick.com/tight.m3u8"},
+        ] if time_window == "day" else [],
+    )
+    ranked_both = analyzer.discover_channel_moments("https://kick.com/davyjones", max_cuts=2, processed_state={"cuts": []})
+    assert [c.best_clip.id for c in ranked_both] == ["k_tight", "k_dump"]
+
+    ranked = analyzer.discover_channel_moments(
+        "https://kick.com/davyjones",
+        max_cuts=2,
+        processed_state={"cuts": [{"twitch_login": "davyjones", "clip_created_at": "2026-11-18T19:01:00Z"}]},
+    )
+    assert len(ranked) == 1
+    assert ranked[0].best_clip.id == "k_tight"
+
     # Se não há clipes fortes e canal está ao vivo, cai para captura ao vivo HLS (`kick_live`)
     monkeypatch.setattr(analyzer, "fetch_channel_clips", lambda slug, time_window="day", sort="view": [])
     live_clusters = analyzer.discover_channel_moments("jonvlogs", max_cuts=1, processed_state={"cuts": []})

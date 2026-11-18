@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -118,10 +119,11 @@ class KickMomentAnalyzer:
         seen_clip_ids = self._collect_seen_clip_ids(processed_state)
         clusters: List[MomentCluster] = []
 
-        # 1. Prioriza clipes reais feitos pela comunidade na Kick (`day` + repescagem `week`)
+        # 1. Prioriza clipes reais feitos pela comunidade na Kick (`day` + repescagem `week`), ranqueados por qualidade real
         min_views = self.cfg.min_views_single_clip_live if is_live else self.cfg.min_views_post_live
         day_clips = self.fetch_channel_clips(slug, time_window="day", sort="view")
         week_clips = self.fetch_channel_clips(slug, time_window="week", sort="view")
+        day_ids = {str(c.get("id") or "").strip() for c in day_clips if c.get("id")}
 
         merged_clips: List[Dict[str, Any]] = []
         seen_raw: set[str] = set()
@@ -131,8 +133,9 @@ class KickMomentAnalyzer:
                 seen_raw.add(cid)
                 merged_clips.append(clip)
 
-        eligible_clips: List[Dict[str, Any]] = []
-        fallback_offline_clips: List[Dict[str, Any]] = []
+        recent_cut_times = self._collect_recent_clip_times(slug, processed_state)
+        eligible_clips: List[tuple[float, Dict[str, Any]]] = []
+        fallback_offline_clips: List[tuple[float, Dict[str, Any]]] = []
         min_dur = max(10.0, self.profile.editing.min_duration_seconds - 4.0)
 
         for clip in merged_clips:
@@ -143,13 +146,24 @@ class KickMomentAnalyzer:
             views = int(clip.get("views") or 0)
             if dur < min_dur:
                 continue
-            if views >= min_views:
-                eligible_clips.append(clip)
-            elif not is_live and views >= 40:
-                fallback_offline_clips.append(clip)
+            c_ts = self._parse_iso(str(clip.get("created_at") or ""))
+            if c_ts is not None and any(abs((c_ts - pt).total_seconds()) <= 150.0 for pt in recent_cut_times):
+                continue
 
+            # Prefere clipes bem enquadrados (24-65s) a recortes soltos gigantes (110-180s cheios de tempo morto)
+            frame_bonus = 60.0 if 24.0 <= dur <= 65.0 else (-45.0 if dur >= 110.0 else 10.0)
+            recency_bonus = 30.0 if cid in day_ids else 0.0
+            rank_score = float(views * 2.0 + frame_bonus + recency_bonus)
+
+            if views >= min_views:
+                eligible_clips.append((rank_score, clip))
+            elif not is_live and views >= 40:
+                fallback_offline_clips.append((rank_score, clip))
+
+        eligible_clips.sort(key=lambda pair: pair[0], reverse=True)
+        fallback_offline_clips.sort(key=lambda pair: pair[0], reverse=True)
         chosen_clips = eligible_clips or (fallback_offline_clips if not is_live else [])
-        for clip in chosen_clips:
+        for rank_score, clip in chosen_clips:
             cid = str(clip.get("id") or "").strip()
             dur = float(clip.get("duration") or 0.0)
             views = int(clip.get("views") or 0)
@@ -172,11 +186,15 @@ class KickMomentAnalyzer:
                     stream_url=stream_url,
                     page_url=page_url,
                     stream_key=f"kick_{slug}_{vod_uuid}",
-                    score=float(views * 2.0 + dur),
+                    score=rank_score,
+                    created_at=str(clip.get("created_at") or ""),
                 )
             )
             if len(clusters) >= max_cuts:
                 return clusters
+
+        if clusters:
+            return clusters
 
         # 2. Se está AO VIVO e ainda não teve clipe forte, captura janela ao vivo do HLS
         if is_live and playback_url:
@@ -348,6 +366,33 @@ class KickMomentAnalyzer:
         return self.discover_channel_moments(slug, max_cuts=max_cuts, processed_state=processed_state)
 
     @staticmethod
+    def _parse_iso(ts: str) -> Optional[datetime]:
+        raw = ts.strip()
+        if not raw:
+            return None
+        try:
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            dt = datetime.fromisoformat(raw)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    def _collect_recent_clip_times(
+        self,
+        slug: str,
+        processed_state: Optional[Dict[str, Any]],
+    ) -> List[datetime]:
+        times: List[datetime] = []
+        for c in (processed_state or {}).get("cuts", []):
+            if str(c.get("twitch_login") or "").lower() != slug:
+                continue
+            dt = self._parse_iso(str(c.get("clip_created_at") or ""))
+            if dt is not None:
+                times.append(dt)
+        return times
+
+    @staticmethod
     def _collect_seen_clip_ids(processed_state: Optional[Dict[str, Any]]) -> set[str]:
         seen: set[str] = set()
         for c in (processed_state or {}).get("cuts", []):
@@ -373,6 +418,7 @@ class KickMomentAnalyzer:
         page_url: str,
         stream_key: str,
         score: float,
+        created_at: str = "",
     ) -> MomentCluster:
         cid = self._make_cluster_id(slug, clip_id)
         tc = TwitchClip(
@@ -380,7 +426,7 @@ class KickMomentAnalyzer:
             url=stream_url,
             title=title,
             view_count=views,
-            created_at="",
+            created_at=created_at,
             duration=duration,
             creator_name=display_name,
             broadcaster_id="kick",
@@ -399,7 +445,7 @@ class KickMomentAnalyzer:
             video_id=clip_id,
             vod_start_offset=0,
             vod_end_offset=int(round(duration)),
-            peak_offset=int(round(duration * 0.5)),
+            peak_offset=int(round(duration * 0.5)) if duration <= 65.0 else None,
             unique_clippers=1,
             total_views=views,
             max_views=views,
