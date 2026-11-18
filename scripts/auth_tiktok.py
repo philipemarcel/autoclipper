@@ -20,9 +20,10 @@ SCOPES = "user.info.basic,video.upload,video.publish"
 
 
 def _generate_pkce() -> tuple[str, str]:
-    verifier = secrets.token_urlsafe(48)
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    # TikTok Desktop exige code_challenge em HEX do SHA-256 (e não base64url padrão RFC 7636)
+    chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    verifier = "".join(secrets.choice(chars) for _ in range(64))
+    challenge = hashlib.sha256(verifier.encode("utf-8")).hexdigest()
     return verifier, challenge
 
 
@@ -57,6 +58,7 @@ def main() -> None:
     parser.add_argument("--redirect-uri", default=DEFAULT_REDIRECT_URI, help="Redirect URI cadastrada no TikTok")
     parser.add_argument("--verifier", default="", help="PKCE verifier salvo (para troca direta via --code-url)")
     parser.add_argument("--code-url", default="", help="URL completa copiada do navegador após autorizar")
+    parser.add_argument("--listen", action="store_true", help="Abre servidor local em 127.0.0.1:8766/callback/")
     args = parser.parse_args()
 
     if args.code_url:
@@ -90,6 +92,42 @@ def main() -> None:
     auth_url = f"https://www.tiktok.com/v2/auth/authorize/?{urllib.parse.urlencode(params)}"
     print(f"PKCE_VERIFIER={verifier}", flush=True)
     print(f"AUTH_URL={auth_url}", flush=True)
+
+    if args.listen:
+        parsed_r = urllib.parse.urlparse(args.redirect_uri.strip())
+        host = parsed_r.hostname or "127.0.0.1"
+        port = parsed_r.port or 8766
+        captured: dict[str, str] = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                if "code" in qs:
+                    captured["code"] = qs["code"][0]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("<h2>✅ TikTok autorizado! Pode voltar ao chat.</h2>".encode("utf-8"))
+                else:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(f"Erro OAuth TikTok: {qs}".encode("utf-8"))
+
+            def log_message(self, format, *args):
+                return
+
+        with http.server.HTTPServer((host, port), Handler) as httpd:
+            httpd.handle_request()
+
+        if "code" in captured:
+            token_data = exchange_code(
+                args.client_key,
+                args.client_secret,
+                captured["code"],
+                args.redirect_uri,
+                verifier,
+            )
+            print("TIKTOK_TOKEN_JSON=" + json.dumps(token_data, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":
