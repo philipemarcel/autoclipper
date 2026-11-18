@@ -714,6 +714,26 @@ def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):
     prompt = director._build_prompt(cl, [WordTimestamp("bora", 1.0, 1.5)], 40.0, 20.0)
     assert "kscerato" in prompt
     assert "Google Trends tempo real" in prompt
+    assert "contando O QUE ESTÁ ACONTECENDO" in prompt
+
+    # Garante que chamadas robóticas de engajamento sejam limpas sem amputar frases narrativas reais
+    dec = director.enforce_constraints(
+        {
+            "main_start": 0.0,
+            "main_end": 35.0,
+            "cold_open_enabled": False,
+            "teaser_start": 0.0,
+            "teaser_end": 0.0,
+            "caption_text": "Davy Jones tenta dar uma de encanador no meio do serviço e acaba alagando tudo! O que vocês acharam?",
+            "hashtags": ["#davyjones", "#cs2", "#fy", "#viral"],
+            "virality_score": 90,
+        },
+        words=[WordTimestamp("oi", 1.0, 1.5)],
+        raw_duration_sec=35.0,
+        peak_hint_sec=15.0,
+    )
+    assert "O que vocês acharam" not in dec.caption_text
+    assert "alagando tudo!" in dec.caption_text
 
 
 def test_drip_timer_override_and_discord_select_menu(tmp_path: Path):

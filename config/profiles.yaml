@@ -54,8 +54,8 @@ profiles:
       watermark_text: ""
 
     copy:
-      # 1 frase curta estilo meme/reação nativa da internet (sem perguntas robóticas) + 4-5 hashtags em alta no momento
-      style: "minimal_meme"
+      # Descrição envolvente contando o que está acontecendo na cena + 4-5 hashtags em alta no momento
+      style: "story_hook"
       max_hashtags: 5
       base_hashtags:
         - "#fy"

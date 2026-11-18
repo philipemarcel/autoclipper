@@ -161,10 +161,13 @@ REGRAS OBRIGATÓRIAS DE EDIÇÃO:
    - Máximo 4 a 5 palavras curtas que aparecem na tela nos 2-3s iniciais.
    - Baseie-se LITERALMENTE no título/assunto do momento (`{cluster.dominant_title}`) ou na frase mais engraçada dita na transcrição.
    - PROIBIDO usar clichês genéricos de IA como "JOGADA DE OURO", "MOMENTO ÉPICO", "IMPERDÍVEL", "INACREDITÁVEL".
-4. COPY DE PÁGINA DE CORTES BR (`caption_text` e `hashtags`):
-   - `caption_text`: 1 única linha curta em caixa baixa, exatamente como páginas reais brasileiras de cortes escrevem no TikTok/Reels.
-   - Use o assunto real deste vídeo do criador `{creator_name}` adaptado de forma natural OU cite a reação/fala literal do criador no vídeo.
-   - PROIBIDO usar frases artificiais de IA como "galera surtando", "segura essa", "deixou todo mundo de cara", "o que acharam?".
+4. DESCRIÇÃO ENVOLVENTE DO VÍDEO (`caption_text` e `hashtags`):
+   - `caption_text`: escreva uma descrição interessante e envolvente (1 a 2 frases curtas, máximo ~220 caracteres) **contando O QUE ESTÁ ACONTECENDO na cena** — quem participa (`{creator_name}`), qual é a situação/reviravolta/treta do corte e o que torna o momento engraçado ou curioso para prender quem vê no feed.
+   - Estruture com clareza narrativa (contexto real tirado da transcrição e dos títulos acima + gancho de curiosidade natural). Pode usar 1 emoji pertinente no máximo se combinar com o tom.
+   - ESTRITAMENTE PROIBIDO:
+     * Copiar uma fala solta ou frase aleatória fora de contexto (ex. RUIM: `"não conhece nada, galera"`, `"caralho que porra"`, `"mendy me deixou doido, quem é você"`).
+     * Clichês artificiais de IA ou chamadas genéricas (ex. RUIM: `"galera surtando"`, `"segura essa"`, `"deixou todo mundo de cara"`, `"vocês não vão acreditar"`, `"o que acharam? comenta aí!"`).
+   - Exemplo de BOM resultado: `"Davy Jones tenta improvisar como encanador no meio do serviço e transforma uma tarefa simples num caos completo 😂"` ou `"Alanzoka achou que tinha escapado da maldição do jogo até o dinossauro aparecer bem atrás dele 💀"`.
    - `hashtags`: exatamente 4 ou {self.profile.copy.max_hashtags} hashtags focadas no que pode **ficar em alta neste momento** (ex: {default_tags}):
      1) criador/participante em evidência (`#{creator_handle}`),
      2) 1 ou 2 tags específicas do assunto/jogo/meme citado (e se algum tema em alta do Google Trends acima tiver ligação real com o clipe, inclua obrigatoriamente!),
@@ -300,13 +303,17 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             else:
                 main_end = main_start + allowed_main
 
-        # Limpeza da copy minimalista (remove interrogações forçadas caso o modelo insista)
+        # Limpeza da descrição (normaliza espaços e remove eventuais chamadas robóticas de engajamento no fim)
         caption = str(raw.get("caption_text") or cluster_fallback_caption(self.profile)).strip()
         caption = re.sub(r"\s+", " ", caption)
-        if "?" in caption and len(caption.split("?")) > 1:
-            first_part = caption.split("?")[0].strip()
-            if len(first_part) > 8 and not first_part.lower().startswith(("quem", "como", "por que", "qual")):
-                caption = first_part
+        caption = re.sub(
+            r"\s*(?:o que (?:vocês|vcs) acharam\??|comenta aí!?|compartilha com os amigos!?)\s*$",
+            "",
+            caption,
+            flags=re.IGNORECASE,
+        ).strip()
+        if len(caption) > 260:
+            caption = caption[:257].rstrip(" ,;:") + "..."
 
         raw_tags = [str(t).strip() for t in (raw.get("hashtags") or []) if str(t).strip()]
         if not raw_tags:
@@ -363,7 +370,10 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             cold_open = False
             t_start, t_end = 0.0, 0.0
 
-        title_clean = (cluster.dominant_title or "simplesmente intancável esse momento").strip()
+        title_clean = (cluster.dominant_title or "momento inesperado durante a live").strip()
+        creator_label = cluster.best_clip.broadcaster_name or self.profile.display_name
+        game_hint = f" em {cluster.game_name}" if cluster.game_name and cluster.game_name.lower() not in {"live", "youtube", "kick"} else ""
+        fallback_desc = f"{creator_label} protagonizou uma cena inesperada{game_hint}: {title_clean}."
         transcript_hint = " ".join(w.word for w in words[:40])
         tags = suggest_dynamic_hashtags(
             creator_handle=cluster.broadcaster_login or self.profile.twitch_login,
@@ -383,7 +393,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
                 "teaser_start": t_start,
                 "teaser_end": t_end,
                 "teaser_headline": title_clean.upper()[:42] if cold_open else "",
-                "caption_text": title_clean.lower(),
+                "caption_text": fallback_desc,
                 "hashtags": tags[: self.profile.copy.max_hashtags],
                 "virality_score": int(min(95, max(60, cluster.score))),
                 "reasoning": "Fallback centrado no pico de clipes da comunidade.",
