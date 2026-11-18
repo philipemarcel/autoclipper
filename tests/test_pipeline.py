@@ -516,3 +516,61 @@ def test_discord_notifier_embed_has_independent_download_and_copy_button():
     custom_ids = [btn["custom_id"] for r in rows for btn in r["components"]]
     assert "copy_caption:c_dl_1" in custom_ids
     assert "approve_tiktok:c_dl_1" in custom_ids
+
+
+def test_youtube_director_trims_context_and_long_transcript_sampling(monkeypatch):
+    # 1. Transcrição longa (>24k chars) deve preservar trechos do início, meio e fim
+    long_lines = "\n".join(f"[{i * 10}s] fala numero {i} acontecendo na live agora" for i in range(900))
+    assert len(long_lines) > 35000
+    sampled = YouTubeMomentAnalyzer._sample_transcript_for_ai(long_lines, max_chars=8000)
+    assert len(sampled) <= 8100
+    assert "[0s]" in sampled
+    assert "[45" in sampled  # meio da live (~4500s)
+    assert "[67" in sampled or "[68" in sampled  # trecho final da live
+
+    # 2. YouTube (`preserve_full_clip=False`) deve respeitar o corte cirúrgico dentro do buffer
+    prof = _make_profile()
+    prof.editing.max_duration_seconds = 65.0
+    prof.editing.cold_open_enabled = False
+    director = GeminiDirector(prof, api_key="", groq_api_key="dummy")
+
+    fake_raw = {
+        "main_start": 14.0,
+        "main_end": 53.0,
+        "cold_open_enabled": False,
+        "teaser_start": 0.0,
+        "teaser_end": 0.0,
+        "teaser_headline": "",
+        "caption_text": "ele achou que ia dar bom",
+        "hashtags": ["#gameplayrj", "#cortes", "#youtube"],
+        "virality_score": 91,
+    }
+    monkeypatch.setattr(director, "_call_groq_llm", lambda prompt: fake_raw)
+
+    words = [WordTimestamp(f"w{i}", float(i), float(i) + 0.5) for i in range(60)]
+    yt_cluster = MomentCluster(
+        cluster_id="yt_c1",
+        profile_id=prof.id,
+        broadcaster_login="gameplayrj",
+        stream_or_vod_key="yt_abc",
+        mode="youtube_auto",
+        clips=[TwitchClip("c1", "https://youtube.com/watch?v=abc", "historia completa", 100, "", 60.0, "Davy", "yt", "Gameplayrj")],
+        video_id="yt_abc",
+        vod_start_offset=100,
+        vod_end_offset=160,
+        peak_offset=130,
+        unique_clippers=1,
+        total_views=100,
+        max_views=100,
+        score=90.0,
+        dominant_title="historia completa",
+    )
+    yt_decision = director.direct_cut(yt_cluster, words, raw_duration_sec=60.0, peak_hint_sec=32.0)
+    assert 13.0 <= yt_decision.main_start <= 15.0
+    assert 52.0 <= yt_decision.main_end <= 54.0
+
+    # Já um clipe da Twitch `<= 65s` continua 100% íntegro (0.0 -> 60.0)
+    tw_cluster = MomentCluster(**{**yt_cluster.__dict__, "cluster_id": "tw_c1", "mode": "live_hot"})
+    tw_decision = director.direct_cut(tw_cluster, words, raw_duration_sec=60.0, peak_hint_sec=32.0)
+    assert tw_decision.main_start == 0.0
+    assert tw_decision.main_end == 60.0

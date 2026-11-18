@@ -25,10 +25,19 @@ class YouTubeDownloader:
         out_path = work_dir / f"{cluster.cluster_id}_raw_yt.mp4"
         out_path.unlink(missing_ok=True)
 
+        dl_start = cluster.vod_start_offset
+
         # Caso 1: Trecho com timestamp definido (`vod_start_offset` e `vod_end_offset`)
         if cluster.vod_start_offset is not None and cluster.vod_end_offset is not None:
-            s0 = max(0, int(cluster.vod_start_offset))
-            s1 = max(s0 + 18, int(cluster.vod_end_offset))
+            orig_s0 = max(0, int(cluster.vod_start_offset))
+            orig_s1 = max(orig_s0 + 18, int(cluster.vod_end_offset))
+            # Baixa buffer generoso antes e depois para o Diretor achar o início/fim exatos da história sem amputar contexto
+            buf_before = 25 if cluster.mode != "youtube_manual" else 8
+            buf_after = 25 if cluster.mode != "youtube_manual" else 8
+            s0 = max(0, orig_s0 - buf_before)
+            s1 = orig_s1 + buf_after
+            dl_start = s0
+
             cmd = [
                 sys.executable,
                 "-m",
@@ -50,11 +59,11 @@ class YouTubeDownloader:
                 str(out_path),
                 url,
             ]
-            logger.info("Baixando trecho do YouTube [%ds -> %ds]: %s", s0, s1, url)
-            subprocess.run(cmd, check=True, timeout=300)
+            logger.info("Baixando trecho + buffer YouTube [%ds -> %ds] (alvo %ds-%ds): %s", s0, s1, orig_s0, orig_s1, url)
+            subprocess.run(cmd, check=True, timeout=360)
         else:
-            # Caso 2: Live do YouTube em andamento — grava 28s seguros da ponta ao vivo (evita travar em segmentos futuros)
-            logger.info("Capturando 28s ao vivo da Live do YouTube: %s", url)
+            # Caso 2: Live do YouTube em andamento — grava 58s da ponta ao vivo para preservar contexto completo da conversa
+            logger.info("Capturando 58s ao vivo da Live do YouTube: %s", url)
             cmd = [
                 sys.executable,
                 "-m",
@@ -69,14 +78,14 @@ class YouTubeDownloader:
                 "--downloader",
                 "ffmpeg",
                 "--downloader-args",
-                "ffmpeg_i:-rw_timeout 8000000 ffmpeg:-t 28",
+                "ffmpeg_i:-rw_timeout 8000000 ffmpeg:-t 58",
                 *get_ytdlp_youtube_args(work_dir, is_live=True),
                 "-o",
                 str(out_path),
                 url,
             ]
             try:
-                subprocess.run(cmd, check=True, timeout=75)
+                subprocess.run(cmd, check=True, timeout=135)
             except subprocess.TimeoutExpired:
                 # Se o ffmpeg já gravou um arquivo válido antes do timeout, reaproveita!
                 if not out_path.exists() or out_path.stat().st_size < 200_000:
@@ -86,10 +95,15 @@ class YouTubeDownloader:
             raise RuntimeError(f"Falha ao baixar trecho do YouTube: {url}")
 
         duration = probe_video_duration(out_path)
+        if dl_start is not None and cluster.peak_offset is not None:
+            peak_in_file = max(5.0, min(max(6.0, duration - 5.0), float(cluster.peak_offset - dl_start)))
+        else:
+            peak_in_file = duration * 0.50
+
         return DownloadedRawMedia(
             video_path=out_path,
             source_type="youtube",
-            slice_start_in_vod=cluster.vod_start_offset,
-            peak_Hint_sec_in_file=duration * 0.55,
+            slice_start_in_vod=dl_start,
+            peak_Hint_sec_in_file=peak_in_file,
             duration_sec=duration,
         )

@@ -64,12 +64,15 @@ class GeminiDirector:
         peak_hint_sec: float,
     ) -> DirectorDecision:
         prompt = self._build_prompt(cluster, words, raw_duration_sec, peak_hint_sec)
+        preserve_full_clip = not cluster.mode.startswith("youtube")
 
         # 1. Tenta Gemini quando chave AIza válida estiver configurada
         if self.api_key and not self.api_key.startswith("AQ."):
             try:
                 raw_decision = self._call_gemini(prompt)
-                return self.enforce_constraints(raw_decision, words, raw_duration_sec, peak_hint_sec)
+                return self.enforce_constraints(
+                    raw_decision, words, raw_duration_sec, peak_hint_sec, preserve_full_clip=preserve_full_clip
+                )
             except Exception as exc:
                 logger.warning("Gemini falhou (%s). Acionando motor LLM Groq 120B...", exc)
 
@@ -77,7 +80,9 @@ class GeminiDirector:
         if self.groq_api_key:
             try:
                 raw_decision = self._call_groq_llm(prompt)
-                return self.enforce_constraints(raw_decision, words, raw_duration_sec, peak_hint_sec)
+                return self.enforce_constraints(
+                    raw_decision, words, raw_duration_sec, peak_hint_sec, preserve_full_clip=preserve_full_clip
+                )
             except Exception as exc:
                 logger.warning("Groq LLM falhou (%s). Tentando fallback...", exc)
 
@@ -85,11 +90,15 @@ class GeminiDirector:
         if self.api_key:
             try:
                 raw_decision = self._call_gemini(prompt)
-                return self.enforce_constraints(raw_decision, words, raw_duration_sec, peak_hint_sec)
+                return self.enforce_constraints(
+                    raw_decision, words, raw_duration_sec, peak_hint_sec, preserve_full_clip=preserve_full_clip
+                )
             except Exception as exc:
                 logger.warning("Chave Gemini AQ. não aceita no endpoint público (%s).", exc)
 
-        return self._fallback_decision(cluster, words, raw_duration_sec, peak_hint_sec)
+        return self._fallback_decision(
+            cluster, words, raw_duration_sec, peak_hint_sec, preserve_full_clip=preserve_full_clip
+        )
 
     def _build_prompt(
         self,
@@ -131,8 +140,9 @@ TRANSCRIÇÃO COM TIMESTAMPS:
 
 REGRAS OBRIGATÓRIAS DE EDIÇÃO:
 1. CORTE PRINCIPAL (`main_start` e `main_end`):
-   - Remova silêncios, enrolação ou fim de assuntos anteriores.
-   - Comece exatamente na frase de contexto/gancho que prepara o momento e termine logo após a reação/desfecho.
+   - {"Use o vídeo bruto acima como BUFFER DE CONTEXTO para encontrar o INÍCIO REAL da conversa/situação (antes do clímax em ~" + f"{peak_hint_sec:.0f}s" + ") e o DESFECHO COMPLETO após a reação." if is_youtube else "Remova silêncios, enrolação ou fim de assuntos anteriores."}
+   - Comece exatamente na frase de contexto/gancho que prepara o momento (`main_start`) e termine logo após a reação/desfecho (`main_end`).
+   - {"NÃO comece o corte no meio de uma frase ou já com o assunto terminando; e se o assunto mudar para leitura de chat/doações ou caminhada sem relação, ENCERRE `main_end` antes dessa quebra (melhor 30–50s coesos do que 60s com assunto desconexo!)." if is_youtube else ""}
    - A soma final (`teaser` + `corte principal`) NUNCA pode passar de {edt.max_duration_seconds:.1f} segundos (se usar teaser de ~2.8s, o corte principal deve ter no máximo ~55.0s).
    - Mínimo desejado: {edt.min_duration_seconds:.1f}s (a menos que o vídeo bruto inteiro seja menor).
 2. COLD OPEN / TEASER (`cold_open_enabled`, `teaser_start`, `teaser_end`):
@@ -213,6 +223,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
         words: List[WordTimestamp],
         raw_duration_sec: float,
         peak_hint_sec: float,
+        preserve_full_clip: bool = True,
     ) -> DirectorDecision:
         edt = self.profile.editing
         max_total = min(edt.max_duration_seconds, raw_duration_sec)
@@ -229,21 +240,21 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
                 if clean_token in norm_map:
                     w.word = norm_map[clean_token]
 
-        # Quando o vídeo de origem é um clipe de referência da Twitch (ou janela curta <= 65s),
+        # Quando o vídeo de origem é um clipe de referência da Twitch (<= 65s),
         # preservamos 100% do início (0.0s) ao fim (raw_duration_sec) SEM cortar nenhum segundo das pontas!
-        # Isso garante que todo o contexto visual inicial e a risada/reação final do clipe fiquem intactos.
-        if raw_duration_sec <= max(65.0, edt.max_duration_seconds):
+        # Já no YouTube (`preserve_full_clip=False`), o corte segue sempre os limites cirúrgicos decididos pelo Diretor.
+        if preserve_full_clip and raw_duration_sec <= max(65.0, edt.max_duration_seconds):
             main_start = 0.0
             main_end = raw_duration_sec
         elif words:
-            near_start = [w for w in words if abs(w.start - main_start) <= 0.6]
+            near_start = [w for w in words if abs(w.start - main_start) <= 0.8]
             if near_start:
                 w0 = min(near_start, key=lambda w: abs(w.start - main_start))
-                main_start = max(0.0, w0.start - 0.12)
-            near_end = [w for w in words if abs(w.end - main_end) <= 0.6]
+                main_start = max(0.0, w0.start - 0.16)
+            near_end = [w for w in words if abs(w.end - main_end) <= 0.8]
             if near_end:
                 w1 = min(near_end, key=lambda w: abs(w.end - main_end))
-                main_end = min(raw_duration_sec, w1.end + 0.22)
+                main_end = min(raw_duration_sec, w1.end + 0.28)
 
         cold_open = bool(raw.get("cold_open_enabled", True)) and edt.cold_open_enabled
         teaser_start = float(raw.get("teaser_start", 0.0))
@@ -320,6 +331,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
         words: List[WordTimestamp],
         raw_duration_sec: float,
         peak_hint_sec: float,
+        preserve_full_clip: bool = True,
     ) -> DirectorDecision:
         edt = self.profile.editing
         cold_open = edt.cold_open_enabled and raw_duration_sec >= edt.cold_open_min_main_duration
@@ -354,6 +366,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             words=words,
             raw_duration_sec=raw_duration_sec,
             peak_hint_sec=peak_hint_sec,
+            preserve_full_clip=preserve_full_clip,
         )
 
 

@@ -403,17 +403,22 @@ class YouTubeMomentAnalyzer:
         if not sub_lines:
             return []
 
+        transcript_sample = self._sample_transcript_for_ai(sub_lines, max_chars=24000)
+
         prompt = f"""
 Você é um editor viral de páginas de cortes no TikTok.
-Analise a transcrição abaixo do vídeo do YouTube "{info.get('title', '')}" e escolha os {max_cuts} momentos MAIS ENGRAÇADOS, ABSURDOS ou DE MAIOR RETENÇÃO entre {min_sec}s e {max_sec}s.
+Analise a transcrição abaixo do vídeo do YouTube "{info.get('title', '')}" e escolha os {max_cuts} momentos MAIS ENGRAÇADOS, AUTO-CONTIDOS e DE MAIOR RETENÇÃO entre {min_sec}s e {max_sec}s.
 
-Regras:
-- Cada momento deve ter entre 45s e 62s de contexto completo (`end_sec - start_sec` entre 45 e 62), começando na introdução do assunto e terminando só depois da reação final.
-- Os momentos NÃO podem se sobrepor (distância mínima de 55s entre eles).
-- `label`: frase curta de 3 a 6 palavras resumindo a piada/momento.
+Regras OBRIGATÓRIAS de contexto:
+- Escolha histórias/acontecimentos COMPLETOS (introdução do assunto + desenvolvimento + clímax/reação).
+- PROIBIDO escolher frases soltas de 2–4 segundos (ex.: elogio rápido a um NPC, saudação, leitura de donate/corações do chat ou silêncio caminhando depois).
+- Comece `start_sec` de **12 a 25 segundos ANTES** da fala principal/clímax (na abertura real do assunto!) e termine `end_sec` só depois da reação final, com duração entre **42s e 60s** (`end_sec - start_sec`).
+- Os momentos NÃO podem se sobrepor (distância mínima de 65s entre eles).
+- `score`: nota inteira ou decimal de `0` a `100` (ex.: `92`).
+- `label`: frase curta de 3 a 6 palavras resumindo o assunto completo do corte.
 
 TRANSCRIÇÃO:
-{sub_lines[:14000]}
+{transcript_sample}
 
 Responda ESTRITAMENTE em JSON válido:
 {{
@@ -459,6 +464,32 @@ Responda ESTRITAMENTE em JSON válido:
         except Exception as exc:
             logger.warning("Aviso ao buscar picos por transcrição YouTube via IA: %s", exc)
             return []
+
+    @staticmethod
+    def _sample_transcript_for_ai(sub_lines: str, max_chars: int = 24000) -> str:
+        """Mantém 100% da transcrição se couber no orçamento; caso seja VOD longo, amostra 4 janelas ao longo de todo o vídeo."""
+        if len(sub_lines) <= max_chars:
+            return sub_lines
+        lines = sub_lines.splitlines()
+        if len(lines) <= 40:
+            return sub_lines[:max_chars]
+
+        bucket_budget = max_chars // 4
+        n = len(lines)
+        anchors = [0, n // 4, n // 2, (3 * n) // 4]
+        parts: List[str] = []
+        for idx, start_i in enumerate(anchors):
+            chunk_lines: List[str] = []
+            acc = 0
+            limit_i = anchors[idx + 1] if idx + 1 < len(anchors) else n
+            for ln in lines[start_i:limit_i]:
+                if acc + len(ln) + 1 > bucket_budget:
+                    break
+                chunk_lines.append(ln)
+                acc += len(ln) + 1
+            if chunk_lines:
+                parts.append("\n".join(chunk_lines))
+        return "\n...\n".join(parts)
 
     @staticmethod
     def _fetch_youtube_auto_captions(info: Dict[str, Any], min_sec: int, max_sec: int) -> str:
