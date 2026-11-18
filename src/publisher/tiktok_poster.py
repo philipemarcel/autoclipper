@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -33,10 +34,36 @@ class TikTokPublisher:
         self.enabled = tt_cfg.enabled
         self.mode = tt_cfg.mode.lower().strip()
         self.access_token = (access_token or get_env_secret(tt_cfg.access_token_env, required=False)).strip()
+        self.refresh_token = os.getenv("TIKTOK_REFRESH_TOKEN", "").strip()
+        self.client_key = os.getenv("TIKTOK_CLIENT_KEY", "").strip()
+        self.client_secret = os.getenv("TIKTOK_CLIENT_SECRET", "").strip()
 
     @property
     def is_ready(self) -> bool:
-        return bool(self.enabled and self.access_token)
+        return bool(
+            self.enabled
+            and (self.access_token or (self.refresh_token and self.client_key and self.client_secret))
+        )
+
+    def _ensure_valid_access_token(self) -> str:
+        if self.refresh_token and self.client_key and self.client_secret:
+            try:
+                resp = requests.post(
+                    f"{TIKTOK_API_BASE}/oauth/token/",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    data={
+                        "client_key": self.client_key,
+                        "client_secret": self.client_secret,
+                        "grant_type": "refresh_token",
+                        "refresh_token": self.refresh_token,
+                    },
+                    timeout=20,
+                )
+                if resp.ok and "access_token" in resp.json():
+                    self.access_token = str(resp.json()["access_token"])
+            except Exception as exc:
+                logger.warning("Aviso ao renovar TIKTOK_REFRESH_TOKEN (%s); usando access_token atual.", exc)
+        return self.access_token
 
     def publish_video(self, video_path: Path, caption: str) -> str:
         if not self.is_ready:
@@ -53,8 +80,9 @@ class TikTokPublisher:
             if total_chunks == 0:
                 total_chunks = 1
 
+        token = self._ensure_valid_access_token()
         headers = {
-            "Authorization": f"Bearer {self.access_token}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json; charset=UTF-8",
         }
 
