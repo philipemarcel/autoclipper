@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import List, Optional
 
 
-def get_ytdlp_youtube_args(work_dir: Optional[Path] = None) -> List[str]:
+def get_ytdlp_youtube_args(work_dir: Optional[Path] = None, is_live: bool = False) -> List[str]:
     """
     Constrói flags resilientes do `yt-dlp` para YouTube em 2026:
       - Ativa runtime JS (`deno` ou `node`, obrigatório nas versões recentes do yt-dlp)
-      - Usa clientes resilientes (`android_vr,tv,web`)
+      - Usa clientes resilientes (`android_vr,tv,web` para VODs; `web,android_vr` para Lives HLS)
       - Injeta `--cookies` automaticamente caso `YOUTUBE_COOKIES_TXT` esteja configurado no `.env` / GitHub Secrets.
     """
     args: List[str] = []
@@ -19,7 +19,10 @@ def get_ytdlp_youtube_args(work_dir: Optional[Path] = None) -> List[str]:
     elif shutil.which("node"):
         args.extend(["--js-runtimes", "node"])
 
-    args.extend(["--extractor-args", "youtube:player_client=android_vr,tv,web"])
+    if is_live:
+        args.extend(["--extractor-args", "youtube:player_client=web,android_vr"])
+    else:
+        args.extend(["--extractor-args", "youtube:player_client=android_vr,tv,web"])
 
     cookies_txt = os.getenv("YOUTUBE_COOKIES_TXT", "").strip()
     if cookies_txt and work_dir is not None:

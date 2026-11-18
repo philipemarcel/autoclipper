@@ -53,8 +53,8 @@ class YouTubeDownloader:
             logger.info("Baixando trecho do YouTube [%ds -> %ds]: %s", s0, s1, url)
             subprocess.run(cmd, check=True, timeout=300)
         else:
-            # Caso 2: Live do YouTube em andamento — grava 45 segundos ao vivo do stream atual
-            logger.info("Capturando 45s ao vivo da Live do YouTube: %s", url)
+            # Caso 2: Live do YouTube em andamento — grava 28s seguros da ponta ao vivo (evita travar em segmentos futuros)
+            logger.info("Capturando 28s ao vivo da Live do YouTube: %s", url)
             cmd = [
                 sys.executable,
                 "-m",
@@ -69,13 +69,18 @@ class YouTubeDownloader:
                 "--downloader",
                 "ffmpeg",
                 "--downloader-args",
-                "ffmpeg:-t 45",
-                *get_ytdlp_youtube_args(work_dir),
+                "ffmpeg_i:-rw_timeout 8000000 ffmpeg:-t 28",
+                *get_ytdlp_youtube_args(work_dir, is_live=True),
                 "-o",
                 str(out_path),
                 url,
             ]
-            subprocess.run(cmd, check=True, timeout=180)
+            try:
+                subprocess.run(cmd, check=True, timeout=75)
+            except subprocess.TimeoutExpired:
+                # Se o ffmpeg já gravou um arquivo válido antes do timeout, reaproveita!
+                if not out_path.exists() or out_path.stat().st_size < 200_000:
+                    raise
 
         if not out_path.exists() or out_path.stat().st_size < 25_000:
             raise RuntimeError(f"Falha ao baixar trecho do YouTube: {url}")
