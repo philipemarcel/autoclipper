@@ -15,12 +15,12 @@ DISCORD_API_BASE = "https://discord.com/api/v10"
 COMMANDS_PAYLOAD = [
     {
         "name": "cortar",
-        "description": "Gera cortes verticais 9:16 automáticos de um vídeo ou live do YouTube",
+        "description": "Gera cortes verticais 9:16 automáticos de um vídeo, live ou clipe (YouTube ou Kick)",
         "type": 1,
         "options": [
             {
                 "name": "url",
-                "description": "Link do vídeo ou live do YouTube (ex: https://youtu.be/...)",
+                "description": "Link do YouTube ou Kick (ex: https://youtu.be/... ou https://kick.com/canal)",
                 "type": 3,  # STRING
                 "required": True,
             },

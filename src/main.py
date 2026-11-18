@@ -19,6 +19,8 @@ from src.config_loader import (
     load_profiles,
     load_subtitle_theme,
 )
+from src.kick.analyzer import KickMomentAnalyzer
+from src.kick.downloader import KickDownloader
 from src.models import CutRecord, MomentCluster, ProfileConfig
 from src.publisher.drip_scheduler import DripScheduler
 from src.storage.gdrive import DriveStore
@@ -56,9 +58,11 @@ def process_single_cluster(
     cut_work_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1. Download da mídia bruta (YouTube Video/Live OU Twitch VOD/Clipe)
+        # 1. Download da mídia bruta (YouTube, Kick OU Twitch VOD/Clipe)
         if cluster.mode.startswith("youtube"):
             raw_media = YouTubeDownloader().download_moment(cluster, cut_work_dir)
+        elif cluster.mode.startswith("kick"):
+            raw_media = KickDownloader().download_moment(cluster, cut_work_dir)
         else:
             downloader = TwitchDownloader(profile.detection)
             raw_media = downloader.download_moment(cluster, cut_work_dir)
@@ -260,6 +264,28 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
                     except Exception as exc:
                         logger.warning("Aviso ao monitorar vídeo YouTube %s: %s", v_url, exc)
 
+        # Monitoramento automático 24/7 dos canais da Kick configurados no perfil (clipes + lives + VODs)
+        if prof.kick_channels:
+            kick_analyzer = KickMomentAnalyzer(prof)
+            kick_budget = max(len(prof.kick_channels), 2) if max_cuts_override is None else max(1, min(3, max_cuts_override))
+            kick_created = 0
+            for k_ref in prof.kick_channels:
+                if kick_created >= kick_budget:
+                    break
+                try:
+                    k_clusters = kick_analyzer.discover_channel_moments(
+                        k_ref,
+                        max_cuts=1,
+                        processed_state=processed_state,
+                    )
+                    for kc in k_clusters:
+                        process_single_cluster(prof, kc, store, theme, processed_state, work_root)
+                        total_created += 1
+                        kick_created += 1
+                        break
+                except Exception as exc:
+                    logger.warning("Aviso ao monitorar canal Kick %s: %s", k_ref, exc)
+
     retention_days = max((int(p.publishing.drive_retention_days) for p in active_profiles), default=10)
     _run_drive_retention_cleanup(store, processed_state, retention_days=retention_days)
     return total_created
@@ -301,6 +327,58 @@ def cmd_cleanup(retention_days: Optional[int] = None) -> int:
     return int(report["deleted"])
 
 
+def cmd_kick(
+    url: str,
+    max_cuts: int = 3,
+    time_range: str = "",
+    profile_filter: Optional[str] = None,
+) -> int:
+    """Processa manualmente um link da Kick (clipe, VOD ou live/canal) via `/cortar` ou CLI."""
+    profiles = load_profiles(only_enabled=True) or load_profiles(only_enabled=False)
+    if profile_filter:
+        matched = [p for p in profiles if p.id == profile_filter or p.twitch_login == profile_filter.lower()]
+        if matched:
+            profiles = matched
+    profile = profiles[0]
+
+    store = DriveStore()
+    theme = load_subtitle_theme()
+    processed_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
+    work_root = PROJECT_ROOT / "work_tmp" / "kick"
+    notifier = DiscordNotifier(profile)
+
+    analyzer = KickMomentAnalyzer(profile)
+    try:
+        clusters = analyzer.discover_manual_url(
+            url=url.strip(),
+            max_cuts=max(1, min(10, int(max_cuts))),
+            time_range_str=time_range,
+            processed_state=processed_state,
+        )
+    except Exception as exc:
+        logger.exception("Erro ao analisar URL da Kick (%s): %s", url, exc)
+        notifier.post_status_reply("", f"❌ Não consegui analisar o link da Kick <{url}>: `{str(exc)[:300]}`")
+        return 0
+
+    if not clusters:
+        notifier.post_status_reply(
+            "",
+            f"⚠️ Não encontrei momentos novos para cortar em <{url}> na Kick (ou já foram processados).",
+        )
+        return 0
+
+    created = 0
+    for cluster in clusters:
+        try:
+            process_single_cluster(profile, cluster, store, theme, processed_state, work_root)
+            created += 1
+        except Exception as exc:
+            logger.exception("Erro ao gerar corte da Kick (%s): %s", cluster.cluster_id, exc)
+            notifier.post_status_reply("", f"❌ Erro ao processar trecho da Kick <{url}>: `{exc}`")
+
+    return created
+
+
 def cmd_youtube(
     url: str,
     max_cuts: int = 3,
@@ -308,9 +386,12 @@ def cmd_youtube(
     profile_filter: Optional[str] = None,
 ) -> int:
     """
-    Processa qualquer URL do YouTube (vídeo pronto, VOD ou Live em andamento) — ou link direto da Twitch —
-    enviado via comando `/cortar` no Discord ou via CLI.
+    Processa qualquer URL do YouTube (vídeo pronto, VOD ou Live em andamento) ou da Kick (`kick.com/...`)
+    enviada via comando `/cortar` no Discord ou via CLI.
     """
+    if "kick.com" in url.lower():
+        return cmd_kick(url=url, max_cuts=max_cuts, time_range=time_range, profile_filter=profile_filter)
+
     profiles = load_profiles(only_enabled=True) or load_profiles(only_enabled=False)
     if profile_filter:
         matched = [p for p in profiles if p.id == profile_filter or p.twitch_login == profile_filter.lower()]
@@ -550,6 +631,12 @@ def build_cli() -> argparse.ArgumentParser:
     p_yt.add_argument("--range", type=str, default="", help="Trecho opcional (ex: 12:30-15:00 ou 25:00).")
     p_yt.add_argument("--profile", type=str, default=None)
 
+    p_kick = sub.add_parser("kick", help="Gera cortes automáticos de um clipe, VOD ou live da Kick.")
+    p_kick.add_argument("--url", type=str, required=True, help="Link ou slug da Kick.")
+    p_kick.add_argument("--max-cuts", type=int, default=3, help="Quantidade de cortes (1 a 10).")
+    p_kick.add_argument("--range", type=str, default="", help="Trecho opcional (ex: 12:30-15:00).")
+    p_kick.add_argument("--profile", type=str, default=None)
+
     sub.add_parser("drip-publish", help="Publica cortes vencidos na Fila Espaçada Inteligente.")
 
     p_clean = sub.add_parser("cleanup", help="Remove do Google Drive vídeos mais antigos que N dias.")
@@ -572,6 +659,13 @@ def main() -> None:
         cmd_watch(profile_filter=args.profile, max_cuts_override=args.max_cuts)
     elif args.command == "youtube":
         cmd_youtube(
+            url=args.url,
+            max_cuts=args.max_cuts,
+            time_range=args.range,
+            profile_filter=args.profile,
+        )
+    elif args.command == "kick":
+        cmd_kick(
             url=args.url,
             max_cuts=args.max_cuts,
             time_range=args.range,

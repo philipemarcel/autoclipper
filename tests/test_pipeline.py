@@ -24,6 +24,7 @@ from src.models import (
 )
 from src.publisher.drip_scheduler import DripScheduler
 from src.publisher.tiktok_poster import TikTokPublisher
+from src.kick.analyzer import KickMomentAnalyzer, extract_kick_slug, parse_kick_url
 from src.storage.gdrive import DriveStore
 from src.twitch.client import parse_twitch_duration_seconds
 from src.twitch.detector import MomentDetector
@@ -574,3 +575,82 @@ def test_youtube_director_trims_context_and_long_transcript_sampling(monkeypatch
     tw_decision = director.direct_cut(tw_cluster, words, raw_duration_sec=60.0, peak_hint_sec=32.0)
     assert tw_decision.main_start == 0.0
     assert tw_decision.main_end == 60.0
+
+
+def test_kick_url_parsing_moment_discovery_and_director(monkeypatch):
+    assert extract_kick_slug("https://kick.com/JonVlogs") == "jonvlogs"
+    assert extract_kick_slug("@paulinho") == "paulinho"
+    assert parse_kick_url("https://kick.com/jonvlogs/clips/clip_123") == {
+        "kind": "clip",
+        "slug": "jonvlogs",
+        "clip_id": "clip_123",
+    }
+    assert parse_kick_url("https://kick.com/jonvlogs/videos/vod_abc") == {
+        "kind": "vod",
+        "slug": "jonvlogs",
+        "vod_id": "vod_abc",
+    }
+    assert parse_kick_url("https://kick.com/jonvlogs?clip=clip_q1") == {
+        "kind": "clip",
+        "slug": "jonvlogs",
+        "clip_id": "clip_q1",
+    }
+
+    prof = _make_profile()
+    prof.editing.max_duration_seconds = 65.0
+    prof.editing.cold_open_enabled = False
+    analyzer = KickMomentAnalyzer(prof)
+
+    monkeypatch.setattr(
+        analyzer,
+        "fetch_channel_info",
+        lambda slug: {"slug": slug, "user": {"username": "JonVlogs"}, "livestream": {"id": 999, "session_title": "IRL"}, "playback_url": "https://stream.kick.com/live.m3u8"},
+    )
+    monkeypatch.setattr(
+        analyzer,
+        "fetch_channel_clips",
+        lambda slug, time_window="day", sort="view": [
+            {"id": "k_seen", "title": "antigo", "views": 500, "duration": 40, "clip_url": "https://clips.kick.com/old.m3u8"},
+            {"id": "k_hot", "title": "quase bateu o carro", "views": 210, "duration": 42, "clip_url": "https://clips.kick.com/hot.m3u8"},
+            {"id": "k_low", "title": "baixo", "views": 12, "duration": 30, "clip_url": "https://clips.kick.com/low.m3u8"},
+        ],
+    )
+    monkeypatch.setattr(analyzer, "fetch_channel_videos", lambda slug: [])
+
+    state = {"cuts": [{"clip_ids": ["k_seen"], "cut_id": "kick_old"}]}
+    clusters = analyzer.discover_channel_moments("https://kick.com/jonvlogs", max_cuts=1, processed_state=state)
+    assert len(clusters) == 1
+    assert clusters[0].mode == "kick_clip"
+    assert clusters[0].best_clip.id == "k_hot"
+    assert clusters[0].broadcaster_login == "jonvlogs"
+
+    # Se não há clipes fortes e canal está ao vivo, cai para captura ao vivo HLS (`kick_live`)
+    monkeypatch.setattr(analyzer, "fetch_channel_clips", lambda slug, time_window="day", sort="view": [])
+    live_clusters = analyzer.discover_channel_moments("jonvlogs", max_cuts=1, processed_state={"cuts": []})
+    assert len(live_clusters) == 1
+    assert live_clusters[0].mode == "kick_live"
+    assert live_clusters[0].best_clip.url == "https://stream.kick.com/live.m3u8"
+
+    # Diretor preserva `kick_clip` <=65s por inteiro e apara `kick_vod` cirurgicamente
+    director = GeminiDirector(prof, api_key="", groq_api_key="dummy")
+    monkeypatch.setattr(
+        director,
+        "_call_groq_llm",
+        lambda prompt: {
+            "main_start": 15.0,
+            "main_end": 50.0,
+            "cold_open_enabled": False,
+            "teaser_start": 0.0,
+            "teaser_end": 0.0,
+            "teaser_headline": "",
+            "caption_text": "ele nao esperava isso",
+            "hashtags": ["#jonvlogs", "#cortes", "#kick"],
+            "virality_score": 88,
+        },
+    )
+    words = [WordTimestamp(f"w{i}", float(i), float(i) + 0.5) for i in range(60)]
+    d_clip = director.direct_cut(clusters[0], words, raw_duration_sec=42.0, peak_hint_sec=21.0)
+    assert d_clip.main_start == 0.0 and d_clip.main_end == 42.0
+    vod_cluster = MomentCluster(**{**live_clusters[0].__dict__, "mode": "kick_vod"})
+    d_vod = director.direct_cut(vod_cluster, words, raw_duration_sec=60.0, peak_hint_sec=30.0)
+    assert 14.0 <= d_vod.main_start <= 16.0 and 49.0 <= d_vod.main_end <= 51.0

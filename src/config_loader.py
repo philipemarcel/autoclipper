@@ -52,6 +52,7 @@ def load_profiles(config_path: Optional[Path] = None, only_enabled: bool = True)
             enabled=bool(item.get("enabled", True)),
             language=str(item.get("language", "pt")),
             youtube_channels=[str(u).strip() for u in (item.get("youtube_channels") or []) if str(u).strip()],
+            kick_channels=[str(u).strip() for u in (item.get("kick_channels") or []) if str(u).strip()],
             detection=DetectionConfig(**det_raw),
             editing=EditingConfig(**edt_raw),
             copy=CopyConfig(**cpy_raw),

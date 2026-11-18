@@ -64,7 +64,8 @@ class GeminiDirector:
         peak_hint_sec: float,
     ) -> DirectorDecision:
         prompt = self._build_prompt(cluster, words, raw_duration_sec, peak_hint_sec)
-        preserve_full_clip = not cluster.mode.startswith("youtube")
+        # Clipes curtos de comunidade (Twitch e Kick <= 65s) são preservados íntegros; VODs/Lives usam recorte cirúrgico
+        preserve_full_clip = cluster.mode in ("live_hot", "post_live", "kick_clip")
 
         # 1. Tenta Gemini quando chave AIza válida estiver configurada
         if self.api_key and not self.api_key.startswith("AQ."):
@@ -111,18 +112,21 @@ class GeminiDirector:
         transcript_block = build_transcript_lines(words)
         edt = self.profile.editing
         is_youtube = cluster.mode.startswith("youtube")
+        is_kick = cluster.mode.startswith("kick")
+        is_external_stream = is_youtube or cluster.mode in ("kick_vod", "kick_live")
         creator_name = (
             cluster.best_clip.broadcaster_name
-            if is_youtube and cluster.best_clip.broadcaster_name
+            if (is_youtube or is_kick) and cluster.best_clip.broadcaster_name
             else self.profile.display_name
         )
         creator_handle = cluster.broadcaster_login or self.profile.twitch_login
-        platform_label = "YouTube" if is_youtube else "Twitch"
-        default_tags = (
-            f'["#{creator_handle}", "#cortes", "#youtube", "#shorts"]'
-            if is_youtube
-            else f'["#{creator_handle}", "#cortes", "#twitchbr"]'
-        )
+        platform_label = "YouTube" if is_youtube else ("Kick" if is_kick else "Twitch")
+        if is_youtube:
+            default_tags = f'["#{creator_handle}", "#cortes", "#youtube", "#shorts"]'
+        elif is_kick:
+            default_tags = f'["#{creator_handle}", "#cortes", "#kick", "#live"]'
+        else:
+            default_tags = f'["#{creator_handle}", "#cortes", "#twitchbr"]'
 
         return f"""
 Você é um editor sênior de páginas virais brasileiras de cortes de lives no TikTok e Instagram Reels.
@@ -140,9 +144,9 @@ TRANSCRIÇÃO COM TIMESTAMPS:
 
 REGRAS OBRIGATÓRIAS DE EDIÇÃO:
 1. CORTE PRINCIPAL (`main_start` e `main_end`):
-   - {"Use o vídeo bruto acima como BUFFER DE CONTEXTO para encontrar o INÍCIO REAL da conversa/situação (antes do clímax em ~" + f"{peak_hint_sec:.0f}s" + ") e o DESFECHO COMPLETO após a reação." if is_youtube else "Remova silêncios, enrolação ou fim de assuntos anteriores."}
+   - {"Use o vídeo bruto acima como BUFFER DE CONTEXTO para encontrar o INÍCIO REAL da conversa/situação (antes do clímax em ~" + f"{peak_hint_sec:.0f}s" + ") e o DESFECHO COMPLETO após a reação." if is_external_stream else "Remova silêncios, enrolação ou fim de assuntos anteriores."}
    - Comece exatamente na frase de contexto/gancho que prepara o momento (`main_start`) e termine logo após a reação/desfecho (`main_end`).
-   - {"NÃO comece o corte no meio de uma frase ou já com o assunto terminando; e se o assunto mudar para leitura de chat/doações ou caminhada sem relação, ENCERRE `main_end` antes dessa quebra (melhor 30–50s coesos do que 60s com assunto desconexo!)." if is_youtube else ""}
+   - {"NÃO comece o corte no meio de uma frase ou já com o assunto terminando; e se o assunto mudar para leitura de chat/doações ou caminhada sem relação, ENCERRE `main_end` antes dessa quebra (melhor 30–50s coesos do que 60s com assunto desconexo!)." if is_external_stream else ""}
    - A soma final (`teaser` + `corte principal`) NUNCA pode passar de {edt.max_duration_seconds:.1f} segundos (se usar teaser de ~2.8s, o corte principal deve ter no máximo ~55.0s).
    - Mínimo desejado: {edt.min_duration_seconds:.1f}s (a menos que o vídeo bruto inteiro seja menor).
 2. COLD OPEN / TEASER (`cold_open_enabled`, `teaser_start`, `teaser_end`):

@@ -49,6 +49,12 @@ class DiscordNotifier:
             mode_badge = "🔴 YOUTUBE LIVE"
         elif cut.mode.startswith("youtube"):
             mode_badge = "▶️ YOUTUBE"
+        elif cut.mode == "kick_live":
+            mode_badge = "🟢 KICK AO VIVO"
+        elif cut.mode == "kick_clip":
+            mode_badge = "🟢 KICK CLIPE"
+        elif cut.mode.startswith("kick"):
+            mode_badge = "🟢 KICK VOD"
         elif cut.mode == "live_hot":
             mode_badge = "🔥 AO VIVO"
         else:
