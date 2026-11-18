@@ -665,9 +665,34 @@ def test_kick_url_parsing_moment_discovery_and_director(monkeypatch):
     words = [WordTimestamp(f"w{i}", float(i), float(i) + 0.5) for i in range(60)]
     d_clip = director.direct_cut(clusters[0], words, raw_duration_sec=42.0, peak_hint_sec=21.0)
     assert d_clip.main_start == 0.0 and d_clip.main_end == 42.0
+
+    # `kick_live` <= 65s também preserva o bloco completo sem cortar os 20s finais
+    d_live = director.direct_cut(live_clusters[0], words, raw_duration_sec=58.0, peak_hint_sec=29.0)
+    assert d_live.main_start == 0.0 and d_live.main_end == 58.0
+
     vod_cluster = MomentCluster(**{**live_clusters[0].__dict__, "mode": "kick_vod"})
     d_vod = director.direct_cut(vod_cluster, words, raw_duration_sec=60.0, peak_hint_sec=30.0)
-    assert 14.0 <= d_vod.main_start <= 16.0 and 49.0 <= d_vod.main_end <= 51.0
+    assert 14.0 <= d_vod.main_start <= 16.0 and 50.0 <= d_vod.main_end <= 52.0
+
+    # Clipe longo da Kick (> 65s) onde o modelo tentou cortar cedo (60s -> 77s de 92s) deve preservar o final até 92s
+    monkeypatch.setattr(
+        director,
+        "_call_groq_llm",
+        lambda prompt: {
+            "main_start": 60.1,
+            "main_end": 77.18,
+            "cold_open_enabled": False,
+            "teaser_start": 0.0,
+            "teaser_end": 0.0,
+            "caption_text": "davy jones reagindo ate o final",
+            "hashtags": ["#davyjones", "#kick", "#fy", "#viral"],
+            "virality_score": 85,
+        },
+    )
+    words_92 = [WordTimestamp(f"w{i}", float(i), float(i) + 0.5) for i in range(90)]
+    d_long_clip = director.direct_cut(clusters[0], words_92, raw_duration_sec=92.0, peak_hint_sec=72.0)
+    assert d_long_clip.main_end == 92.0
+    assert d_long_clip.total_duration == 65.0
 
 
 def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):

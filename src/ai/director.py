@@ -65,15 +65,21 @@ class GeminiDirector:
         peak_hint_sec: float,
     ) -> DirectorDecision:
         prompt = self._build_prompt(cluster, words, raw_duration_sec, peak_hint_sec)
-        # Clipes curtos de comunidade (Twitch e Kick <= 65s) são preservados íntegros; VODs/Lives usam recorte cirúrgico
-        preserve_full_clip = cluster.mode in ("live_hot", "post_live", "kick_clip")
+        # Clipes curtos da comunidade (Twitch/Kick <= 65s) e captura ao vivo da Kick (`<= 65s`) são preservados íntegros
+        preserve_full_clip = cluster.mode in ("live_hot", "post_live", "kick_clip", "kick_live")
+        prefer_clip_ending = cluster.mode == "kick_clip"
 
         # 1. Tenta Gemini quando chave AIza válida estiver configurada
         if self.api_key and not self.api_key.startswith("AQ."):
             try:
                 raw_decision = self._call_gemini(prompt)
                 return self.enforce_constraints(
-                    raw_decision, words, raw_duration_sec, peak_hint_sec, preserve_full_clip=preserve_full_clip
+                    raw_decision,
+                    words,
+                    raw_duration_sec,
+                    peak_hint_sec,
+                    preserve_full_clip=preserve_full_clip,
+                    prefer_clip_ending=prefer_clip_ending,
                 )
             except Exception as exc:
                 logger.warning("Gemini falhou (%s). Acionando motor LLM Groq 120B...", exc)
@@ -83,7 +89,12 @@ class GeminiDirector:
             try:
                 raw_decision = self._call_groq_llm(prompt)
                 return self.enforce_constraints(
-                    raw_decision, words, raw_duration_sec, peak_hint_sec, preserve_full_clip=preserve_full_clip
+                    raw_decision,
+                    words,
+                    raw_duration_sec,
+                    peak_hint_sec,
+                    preserve_full_clip=preserve_full_clip,
+                    prefer_clip_ending=prefer_clip_ending,
                 )
             except Exception as exc:
                 logger.warning("Groq LLM falhou (%s). Tentando fallback...", exc)
@@ -93,13 +104,23 @@ class GeminiDirector:
             try:
                 raw_decision = self._call_gemini(prompt)
                 return self.enforce_constraints(
-                    raw_decision, words, raw_duration_sec, peak_hint_sec, preserve_full_clip=preserve_full_clip
+                    raw_decision,
+                    words,
+                    raw_duration_sec,
+                    peak_hint_sec,
+                    preserve_full_clip=preserve_full_clip,
+                    prefer_clip_ending=prefer_clip_ending,
                 )
             except Exception as exc:
                 logger.warning("Chave Gemini AQ. não aceita no endpoint público (%s).", exc)
 
         return self._fallback_decision(
-            cluster, words, raw_duration_sec, peak_hint_sec, preserve_full_clip=preserve_full_clip
+            cluster,
+            words,
+            raw_duration_sec,
+            peak_hint_sec,
+            preserve_full_clip=preserve_full_clip,
+            prefer_clip_ending=prefer_clip_ending,
         )
 
     def _build_prompt(
@@ -150,8 +171,9 @@ TRANSCRIÇÃO COM TIMESTAMPS:
 REGRAS OBRIGATÓRIAS DE EDIÇÃO:
 1. CORTE PRINCIPAL (`main_start` e `main_end`):
    - {"Use o vídeo bruto acima como BUFFER DE CONTEXTO para encontrar o INÍCIO REAL da conversa/situação (antes do clímax em ~" + f"{peak_hint_sec:.0f}s" + ") e o DESFECHO COMPLETO após a reação." if is_external_stream else "Remova silêncios, enrolação ou fim de assuntos anteriores."}
-   - Comece exatamente na frase de contexto/gancho que prepara o momento (`main_start`) e termine logo após a reação/desfecho (`main_end`).
+   - Comece exatamente na frase de contexto/gancho que prepara o momento (`main_start`) e termine só após toda a reação/risada/desfecho final (`main_end` — deixe sempre +1.5s a +3s de respiro após a última fala).
    - {"NÃO comece o corte no meio de uma frase ou já com o assunto terminando; e se o assunto mudar para leitura de chat/doações ou caminhada sem relação, ENCERRE `main_end` antes dessa quebra (melhor 30–50s coesos do que 60s com assunto desconexo!)." if is_external_stream else ""}
+   - {"ATENÇÃO (Clipe longo da Kick > 65s): o clipe original tem " + f"{raw_duration_sec:.1f}s" + " porque quem clipou incluiu a reação até o final! Prefira manter a janela final completa até ~" + f"{raw_duration_sec:.1f}s" + " (aproveitando de 45s a " + f"{edt.max_duration_seconds:.0f}s" + ") em vez de encerrar cedo aos 17s–30s." if cluster.mode == "kick_clip" and raw_duration_sec > max(65.0, edt.max_duration_seconds) else ""}
    - A soma final (`teaser` + `corte principal`) NUNCA pode passar de {edt.max_duration_seconds:.1f} segundos (se usar teaser de ~2.8s, o corte principal deve ter no máximo ~55.0s).
    - Mínimo desejado: {edt.min_duration_seconds:.1f}s (a menos que o vídeo bruto inteiro seja menor).
 2. COLD OPEN / TEASER (`cold_open_enabled`, `teaser_start`, `teaser_end`):
@@ -239,6 +261,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
         raw_duration_sec: float,
         peak_hint_sec: float,
         preserve_full_clip: bool = True,
+        prefer_clip_ending: bool = False,
     ) -> DirectorDecision:
         edt = self.profile.editing
         max_total = min(edt.max_duration_seconds, raw_duration_sec)
@@ -255,21 +278,37 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
                 if clean_token in norm_map:
                     w.word = norm_map[clean_token]
 
-        # Quando o vídeo de origem é um clipe de referência da Twitch (<= 65s),
+        # Quando o vídeo de origem é um clipe curto da Twitch/Kick (<= 65s),
         # preservamos 100% do início (0.0s) ao fim (raw_duration_sec) SEM cortar nenhum segundo das pontas!
-        # Já no YouTube (`preserve_full_clip=False`), o corte segue sempre os limites cirúrgicos decididos pelo Diretor.
         if preserve_full_clip and raw_duration_sec <= max(65.0, edt.max_duration_seconds):
             main_start = 0.0
             main_end = raw_duration_sec
-        elif words:
-            near_start = [w for w in words if abs(w.start - main_start) <= 0.8]
-            if near_start:
-                w0 = min(near_start, key=lambda w: abs(w.start - main_start))
-                main_start = max(0.0, w0.start - 0.16)
-            near_end = [w for w in words if abs(w.end - main_end) <= 0.8]
-            if near_end:
-                w1 = min(near_end, key=lambda w: abs(w.end - main_end))
-                main_end = min(raw_duration_sec, w1.end + 0.28)
+        else:
+            if words:
+                near_start = [w for w in words if abs(w.start - main_start) <= 0.8]
+                if near_start:
+                    w0 = min(near_start, key=lambda w: abs(w.start - main_start))
+                    main_start = max(0.0, w0.start - 0.16)
+                near_end = [w for w in words if abs(w.end - main_end) <= 0.8]
+                if near_end:
+                    w1 = min(near_end, key=lambda w: abs(w.end - main_end))
+                    main_end = min(raw_duration_sec, w1.end + 1.35)
+
+            # Evita cortar os últimos ~3.5s de risada/reação quando já está no fim do clipe
+            if (raw_duration_sec - main_end) <= 3.5 and (raw_duration_sec - main_start) <= max_total:
+                main_end = raw_duration_sec
+
+            # Para clipes longos da Kick (> 65s): evita encerrar o clipe cedo aos 17s-30s amputando o final
+            if prefer_clip_ending and raw_duration_sec > max_total:
+                if raw_duration_sec <= 115.0 and (raw_duration_sec - main_end) <= 22.0:
+                    main_end = raw_duration_sec
+                    if (main_end - main_start) > max_total:
+                        main_start = max(0.0, main_end - max_total)
+                if (main_end - main_start) < min(50.0, max_total):
+                    desired = min(max_total, raw_duration_sec - main_start)
+                    main_end = min(raw_duration_sec, max(main_end, main_start + desired))
+                    if (main_end - main_start) < min(50.0, max_total):
+                        main_start = max(0.0, main_end - min(max_total, raw_duration_sec))
 
         cold_open = bool(raw.get("cold_open_enabled", True)) and edt.cold_open_enabled
         teaser_start = float(raw.get("teaser_start", 0.0))
@@ -355,6 +394,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
         raw_duration_sec: float,
         peak_hint_sec: float,
         preserve_full_clip: bool = True,
+        prefer_clip_ending: bool = False,
     ) -> DirectorDecision:
         edt = self.profile.editing
         cold_open = edt.cold_open_enabled and raw_duration_sec >= edt.cold_open_min_main_duration
@@ -402,6 +442,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             raw_duration_sec=raw_duration_sec,
             peak_hint_sec=peak_hint_sec,
             preserve_full_clip=preserve_full_clip,
+            prefer_clip_ending=prefer_clip_ending,
         )
 
 

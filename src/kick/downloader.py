@@ -52,6 +52,8 @@ class KickDownloader:
             cmd = [
                 ffmpeg_bin,
                 "-y",
+                "-fflags",
+                "+genpts",
                 "-ss",
                 str(s0),
                 "-i",
@@ -60,6 +62,8 @@ class KickDownloader:
                 str(span),
                 "-c",
                 "copy",
+                "-avoid_negative_ts",
+                "make_zero",
                 "-movflags",
                 "+faststart",
                 str(out_path),
@@ -68,11 +72,13 @@ class KickDownloader:
             if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 25_000:
                 self._download_hls_or_ytdlp(ffmpeg_bin, stream_url, page_url, out_path, section=(s0, s1))
         else:
-            # Live da Kick ao vivo: captura 58s contínuos do stream HLS
+            # Live da Kick ao vivo: captura 58s contínuos do stream HLS com PTS zerado
             logger.info("Capturando 58s ao vivo da Kick: %s", stream_url)
             cmd = [
                 ffmpeg_bin,
                 "-y",
+                "-fflags",
+                "+genpts",
                 "-rw_timeout",
                 "8000000",
                 "-i",
@@ -81,6 +87,8 @@ class KickDownloader:
                 "58",
                 "-c",
                 "copy",
+                "-avoid_negative_ts",
+                "make_zero",
                 "-movflags",
                 "+faststart",
                 str(out_path),
@@ -119,7 +127,7 @@ class KickDownloader:
         live_seconds: int | None = None,
     ) -> None:
         if stream_url.endswith(".m3u8") or ".m3u8" in stream_url:
-            cmd = [ffmpeg_bin, "-y"]
+            cmd = [ffmpeg_bin, "-y", "-fflags", "+genpts"]
             if section:
                 cmd.extend(["-ss", str(section[0])])
             cmd.extend(["-i", stream_url])
@@ -127,7 +135,7 @@ class KickDownloader:
                 cmd.extend(["-t", str(section[1] - section[0])])
             elif live_seconds:
                 cmd.extend(["-t", str(live_seconds)])
-            cmd.extend(["-c", "copy", "-movflags", "+faststart", str(out_path)])
+            cmd.extend(["-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(out_path)])
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
             if proc.returncode == 0 and out_path.exists() and out_path.stat().st_size >= 25_000:
                 return
