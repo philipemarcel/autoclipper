@@ -101,17 +101,30 @@ class GeminiDirector:
         clip_titles = list({c.title for c in cluster.clips if c.title})[:8]
         transcript_block = build_transcript_lines(words)
         edt = self.profile.editing
+        is_youtube = cluster.mode.startswith("youtube")
+        creator_name = (
+            cluster.best_clip.broadcaster_name
+            if is_youtube and cluster.best_clip.broadcaster_name
+            else self.profile.display_name
+        )
+        creator_handle = cluster.broadcaster_login or self.profile.twitch_login
+        platform_label = "YouTube" if is_youtube else "Twitch"
+        default_tags = (
+            f'["#{creator_handle}", "#cortes", "#youtube", "#shorts"]'
+            if is_youtube
+            else f'["#{creator_handle}", "#cortes", "#twitchbr"]'
+        )
 
         return f"""
 Você é um editor sênior de páginas virais brasileiras de cortes de lives no TikTok e Instagram Reels.
 
-DADOS DO MOMENTO NA TWITCH:
-- Criador: {self.profile.display_name} (@{self.profile.twitch_login})
+DADOS DO MOMENTO ({platform_label}):
+- Criador: {creator_name} (@{creator_handle})
 - Categoria/Jogo: {cluster.game_name or "Live"}
-- Título da Live: {cluster.stream_title or "N/A"}
-- Títulos que os espectadores deram aos clipes deste exato momento: {json.dumps(clip_titles, ensure_ascii=False)}
+- Título da Live/Vídeo: {cluster.stream_title or "N/A"}
+- Títulos/temas deste momento: {json.dumps(clip_titles, ensure_ascii=False)}
 - Duração total do vídeo bruto extraído: {raw_duration_sec:.2f}s
-- Ponto onde a comunidade mais clipou (pico aproximado): ~{peak_hint_sec:.1f}s
+- Ponto principal aproximado: ~{peak_hint_sec:.1f}s
 
 TRANSCRIÇÃO COM TIMESTAMPS:
 {transcript_block}
@@ -127,13 +140,13 @@ REGRAS OBRIGATÓRIAS DE EDIÇÃO:
    - Escolha os {edt.cold_open_min_seconds:.1f}s a {edt.cold_open_max_seconds:.1f}s mais explosivos/engraçados do clímax dentro da janela para aparecerem no segundo 00:00.
 3. HEADLINE DO TEASER (`teaser_headline`):
    - Máximo 4 a 5 palavras curtas que aparecem na tela nos 2-3s iniciais.
-   - Baseie-se LITERALMENTE no título que o espectador deu ao clipe (`{cluster.dominant_title}`) ou na frase mais engraçada dita na transcrição.
+   - Baseie-se LITERALMENTE no título/assunto do momento (`{cluster.dominant_title}`) ou na frase mais engraçada dita na transcrição.
    - PROIBIDO usar clichês genéricos de IA como "JOGADA DE OURO", "MOMENTO ÉPICO", "IMPERDÍVEL", "INACREDITÁVEL".
 4. COPY DE PÁGINA DE CORTES BR (`caption_text` e `hashtags`):
-   - `caption_text`: 1 única linha curta em caixa baixa, exatamente como páginas reais brasileiras de cortes da Twitch escrevem no TikTok/Reels.
-   - Use o próprio título do clipe da comunidade (`{cluster.dominant_title}`) adaptado de forma natural OU cite a reação/fala literal do streamer no vídeo (ex: "ele reclamando dos 30 fps no primeiro minuto de jogo kkkkk", "o primeiro roubo em vice city já deu tudo errado 💀").
+   - `caption_text`: 1 única linha curta em caixa baixa, exatamente como páginas reais brasileiras de cortes escrevem no TikTok/Reels.
+   - Use o assunto real deste vídeo do criador `{creator_name}` adaptado de forma natural OU cite a reação/fala literal do criador no vídeo.
    - PROIBIDO usar frases artificiais de IA como "galera surtando", "segura essa", "deixou todo mundo de cara", "o que acharam?".
-   - `hashtags`: exatamente 3 ou 4 hashtags curtas (`["#{self.profile.twitch_login}", "#cortes", "#twitchbr"]` + tag do jogo).
+   - `hashtags`: exatamente 3 ou 4 hashtags curtas correspondentes ao criador `{creator_handle}` e ao assunto (ex: {default_tags}).
 5. CORREÇÃO DE GRAFIA DO WHISPER (`word_corrections`):
    - Se notar na transcrição alguma palavra claramente ouvida errado pelo Whisper (ex: nome de jogo, gíria ou palavra trocada), inclua no dicionário `"word_corrections": {{"palavra_errada": "palavra_certa"}}` (caso contrário, `{{}}`).
 

@@ -412,7 +412,10 @@ Responda ESTRITAMENTE em JSON válido:
                     s1 = min(max_sec, s0 + 42)
                 if s1 - s0 > 62:
                     s1 = s0 + 56
-                out.append((s0, s1, float(m.get("score", 90.0)), str(m.get("label", ""))))
+                raw_sc = float(m.get("score", 90.0))
+                if raw_sc <= 10.0:
+                    raw_sc *= 10.0
+                out.append((s0, s1, round(raw_sc, 1), str(m.get("label", ""))))
             return out[:max_cuts]
         except Exception as exc:
             logger.warning("Aviso ao buscar picos por transcrição YouTube via IA: %s", exc)
