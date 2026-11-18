@@ -34,6 +34,11 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Set up Deno (required by yt-dlp YouTube EJS)
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
       - name: Install FFmpeg & Fonts
         run: |
           sudo apt-get update -y
@@ -56,6 +61,7 @@ jobs:
           GDRIVE_ROOT_FOLDER_NAME: ${{ vars.GDRIVE_ROOT_FOLDER_NAME || 'TwitchAutoClipper' }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          YOUTUBE_COOKIES_TXT: ${{ secrets.YOUTUBE_COOKIES_TXT }}
         run: |
           ARGS=("watch")
           if [ -n "${{ inputs.profile }}" ]; then

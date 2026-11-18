@@ -8,6 +8,7 @@ from pathlib import Path
 from src.ffmpeg_utils import get_ffmpeg_bin
 from src.models import MomentCluster
 from src.twitch.downloader import DownloadedRawMedia, probe_video_duration
+from src.youtube.ytdlp_opts import get_ytdlp_youtube_args
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ class YouTubeDownloader:
                 "mp4",
                 "--download-sections",
                 f"*{s0}-{s1}",
+                *get_ytdlp_youtube_args(work_dir),
                 "-o",
                 str(out_path),
                 url,
@@ -68,6 +70,7 @@ class YouTubeDownloader:
                 "ffmpeg",
                 "--downloader-args",
                 "ffmpeg:-t 45",
+                *get_ytdlp_youtube_args(work_dir),
                 "-o",
                 str(out_path),
                 url,

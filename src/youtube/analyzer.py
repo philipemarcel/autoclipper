@@ -14,6 +14,7 @@ import requests
 
 from src.ffmpeg_utils import get_ffmpeg_bin
 from src.models import MomentCluster, ProfileConfig, TwitchClip
+from src.youtube.ytdlp_opts import get_ytdlp_youtube_args
 
 logger = logging.getLogger(__name__)
 
@@ -84,10 +85,14 @@ class YouTubeMomentAnalyzer:
             get_ffmpeg_bin(),
             "--no-playlist",
             "--dump-single-json",
+            *get_ytdlp_youtube_args(work_dir),
             url.strip(),
         ]
         logger.info("Extraindo metadados do YouTube: %s", url)
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=90)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        if proc.returncode != 0:
+            err_msg = (proc.stderr or proc.stdout or "").strip()[-400:]
+            raise RuntimeError(f"yt-dlp metadata falhou ({proc.returncode}): {err_msg}")
         return json.loads(proc.stdout)
 
     def discover_channel_recent_urls(self, channel_url: str, max_items: int = 2) -> List[str]:
