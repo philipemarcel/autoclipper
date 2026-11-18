@@ -16,7 +16,7 @@ on:
         default: ""
 
 concurrency:
-  group: twitch-autocliper-state-sync
+  group: watch-and-clip-loop
   cancel-in-progress: false
 
 jobs:

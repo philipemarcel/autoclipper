@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: twitch-autocliper-state-sync
+  group: drip-publisher-loop
   cancel-in-progress: false
 
 jobs:

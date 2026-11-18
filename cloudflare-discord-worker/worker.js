@@ -77,7 +77,36 @@ function renderHtmlPage(title, heading, bodyHtml) {
 </html>`;
 }
 
+async function dispatchWorkflow(env, workflowFile, inputs = {}) {
+  return fetch(
+    `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/${workflowFile}/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.GITHUB_PAT}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "TwitchAutoClipper-DiscordWorker",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ref: env.GITHUB_BRANCH || "main",
+        inputs,
+      }),
+    }
+  );
+}
+
 export default {
+  // Cron Trigger 24/7 na Cloudflare (pontual a cada 15 min — elimina atrasos do cron do GitHub!)
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      Promise.all([
+        dispatchWorkflow(env, "watch_and_clip.yml", { max_cuts: "2" }),
+        dispatchWorkflow(env, "drip_publisher.yml", {}),
+      ])
+    );
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;

@@ -221,24 +221,36 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
             except Exception as exc:
                 logger.exception("Erro ao processar cluster %s: %s", cluster.cluster_id, exc)
 
-        # Monitoramento automático 24/7 dos canais do YouTube configurados no perfil (vídeos novos e lives)
-        if prof.youtube_channels and total_created < prof.detection.max_cuts_per_run:
+        # Monitoramento automático 24/7 dos canais do YouTube configurados no perfil (vídeos novos + lives + repescagem)
+        # Usa cota independente da Twitch para que os canais do YouTube nunca fiquem bloqueados quando a Twitch tem muitos clipes.
+        if prof.youtube_channels:
             yt_analyzer = YouTubeMomentAnalyzer(prof)
+            yt_budget = 2 if max_cuts_override is None else max(1, min(2, max_cuts_override))
+            yt_created = 0
             for ch_url in prof.youtube_channels:
+                if yt_created >= yt_budget:
+                    break
                 recent_urls = yt_analyzer.discover_channel_recent_urls(ch_url, max_items=1)
                 for v_url in recent_urls:
-                    if total_created >= prof.detection.max_cuts_per_run:
+                    if yt_created >= yt_budget:
                         break
+                    # Evita reanalisar um vídeo/VOD do YouTube que já gerou 2+ cortes
+                    vid_match = __import__("re").search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{6,})", v_url)
+                    yt_key = f"yt_{vid_match.group(1)}" if vid_match else ""
+                    if yt_key and sum(1 for c in processed_state.get("cuts", []) if c.get("stream_key") == yt_key) >= 2:
+                        continue
                     try:
                         _, yt_clusters = yt_analyzer.discover_moments(
                             url=v_url,
-                            max_cuts=min(2, prof.detection.max_cuts_per_run - total_created),
+                            max_cuts=1,
                             work_dir=work_root / "yt_meta",
                             processed_state=processed_state,
                         )
                         for ytc in yt_clusters:
                             process_single_cluster(prof, ytc, store, theme, processed_state, work_root)
                             total_created += 1
+                            yt_created += 1
+                            break
                     except Exception as exc:
                         logger.warning("Aviso ao monitorar vídeo YouTube %s: %s", v_url, exc)
 
