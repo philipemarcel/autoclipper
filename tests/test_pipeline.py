@@ -624,6 +624,20 @@ def test_kick_url_parsing_moment_discovery_and_director(monkeypatch):
     assert clusters[0].best_clip.id == "k_hot"
     assert clusters[0].broadcaster_login == "jonvlogs"
 
+    # Repescagem: quando clipe de `day` já foi visto, deve buscar clipe elegível da janela `week`
+    def fake_clips_day_vs_week(slug, time_window="day", sort="view"):
+        if time_window == "day":
+            return [{"id": "k_hot", "title": "visto", "views": 210, "duration": 42, "clip_url": "https://clips.kick.com/hot.m3u8"}]
+        return [
+            {"id": "k_hot", "title": "visto", "views": 210, "duration": 42, "clip_url": "https://clips.kick.com/hot.m3u8"},
+            {"id": "k_week_1", "title": "repescagem semanal", "views": 350, "duration": 48, "clip_url": "https://clips.kick.com/w1.m3u8"},
+        ]
+
+    monkeypatch.setattr(analyzer, "fetch_channel_clips", fake_clips_day_vs_week)
+    week_clusters = analyzer.discover_channel_moments("https://kick.com/jonvlogs", max_cuts=1, processed_state={"cuts": [{"clip_ids": ["k_hot"]}]})
+    assert len(week_clusters) == 1
+    assert week_clusters[0].best_clip.id == "k_week_1"
+
     # Se não há clipes fortes e canal está ao vivo, cai para captura ao vivo HLS (`kick_live`)
     monkeypatch.setattr(analyzer, "fetch_channel_clips", lambda slug, time_window="day", sort="view": [])
     live_clusters = analyzer.discover_channel_moments("jonvlogs", max_cuts=1, processed_state={"cuts": []})

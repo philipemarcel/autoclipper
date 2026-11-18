@@ -118,23 +118,41 @@ class KickMomentAnalyzer:
         seen_clip_ids = self._collect_seen_clip_ids(processed_state)
         clusters: List[MomentCluster] = []
 
-        # 1. Prioriza clipes reais feitos pela comunidade na Kick (dia -> semana)
+        # 1. Prioriza clipes reais feitos pela comunidade na Kick (`day` + repescagem `week`)
         min_views = self.cfg.min_views_single_clip_live if is_live else self.cfg.min_views_post_live
-        raw_clips = self.fetch_channel_clips(slug, time_window="day", sort="view")
-        if not raw_clips:
-            raw_clips = self.fetch_channel_clips(slug, time_window="week", sort="view")
+        day_clips = self.fetch_channel_clips(slug, time_window="day", sort="view")
+        week_clips = self.fetch_channel_clips(slug, time_window="week", sort="view")
 
-        for clip in raw_clips:
+        merged_clips: List[Dict[str, Any]] = []
+        seen_raw: set[str] = set()
+        for clip in list(day_clips) + list(week_clips):
+            cid = str(clip.get("id") or "").strip()
+            if cid and cid not in seen_raw:
+                seen_raw.add(cid)
+                merged_clips.append(clip)
+
+        eligible_clips: List[Dict[str, Any]] = []
+        fallback_offline_clips: List[Dict[str, Any]] = []
+        min_dur = max(10.0, self.profile.editing.min_duration_seconds - 4.0)
+
+        for clip in merged_clips:
             cid = str(clip.get("id") or "").strip()
             if not cid or cid in seen_clip_ids:
                 continue
             dur = float(clip.get("duration") or 0.0)
             views = int(clip.get("views") or 0)
-            if dur < max(10.0, self.profile.editing.min_duration_seconds - 4.0):
+            if dur < min_dur:
                 continue
-            if views < min_views:
-                continue
+            if views >= min_views:
+                eligible_clips.append(clip)
+            elif not is_live and views >= 40:
+                fallback_offline_clips.append(clip)
 
+        chosen_clips = eligible_clips or (fallback_offline_clips if not is_live else [])
+        for clip in chosen_clips:
+            cid = str(clip.get("id") or "").strip()
+            dur = float(clip.get("duration") or 0.0)
+            views = int(clip.get("views") or 0)
             stream_url = str(clip.get("clip_url") or clip.get("video_url") or "").strip()
             page_url = f"https://kick.com/{slug}/clips/{cid}"
             if not stream_url:
