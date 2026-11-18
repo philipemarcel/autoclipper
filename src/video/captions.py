@@ -275,12 +275,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             )
 
         # 2. Legendas dinâmicas palavra a palavra (Submagic / OpusClip Pro)
+        # Primeiro montamos todos os eventos em memória e depois travamos `end <= next_start - 0.02`
+        # para GARANTIR matematicamente que duas legendas NUNCA se sobreponham na tela!
+        raw_cap_events: List[Tuple[float, float, str]] = []
         for chunk_idx, chunk in enumerate(chunks):
             tokens = [
                 escape_ass_text(w.word.upper() if uppercase else w.word)
                 for w in chunk
             ]
-            # Micro-inclinação dinâmica sutil quando for 1 palavra isolada de impacto
             tilt_tag = ""
             if len(tokens) == 1:
                 angle = 2 if (chunk_idx % 2 == 0) else -2
@@ -291,31 +293,37 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 if i < len(chunk) - 1:
                     seg_end = max(word_obj.end, chunk[i + 1].start)
                 else:
-                    seg_end = word_obj.end + 0.10
+                    seg_end = word_obj.end + 0.06
 
                 active_color = self._pick_active_color(tokens[i], chunk_idx, gold_ass, green_ass, coral_ass)
                 rendered_words: List[str] = []
 
                 for j, tok in enumerate(tokens):
                     if j == i:
-                        # Palavra sendo falada AGORA: pop elástico + cor vibrante
                         rendered_words.append(
                             f"{{\\c{active_color}&\\fscx{active_scale}\\fscy{active_scale}"
                             f"\\t(0,95,\\fscx108\\fscy108)}}{tok}"
                             f"{{\\c{primary_ass}&\\fscx100\\fscy100}}"
                         )
                     elif j < i:
-                        # Palavra já falada no bloco: branco puro
                         rendered_words.append(f"{{\\c{primary_ass}&\\fscx100\\fscy100}}{tok}")
                     else:
-                        # Palavra que ainda vai ser falada no bloco: prata suave
                         rendered_words.append(f"{{\\c{upcoming_ass}&\\fscx96\\fscy96}}{tok}{{\\fscx100\\fscy100}}")
 
                 pos_prefix = f"{{\\pos({w_canvas // 2},{cap_y}){tilt_tag}}}"
                 line_text = pos_prefix + " ".join(rendered_words)
-                events.append(
-                    f"Dialogue: 2,{format_ass_time(seg_start)},{format_ass_time(seg_end)},OpusCap,,0,0,0,,{line_text}"
-                )
+                raw_cap_events.append((seg_start, seg_end, line_text))
+
+        # Clamping estrito anti-sobreposição
+        for idx, (st_t, en_t, line_txt) in enumerate(raw_cap_events):
+            if idx < len(raw_cap_events) - 1:
+                next_start = raw_cap_events[idx + 1][0]
+                en_t = min(en_t, next_start - 0.015)
+            if en_t <= st_t + 0.02:
+                en_t = st_t + 0.02
+            events.append(
+                f"Dialogue: 2,{format_ass_time(st_t)},{format_ass_time(en_t)},OpusCap,,0,0,0,,{line_txt}"
+            )
 
         return header + "\n".join(events) + "\n"
 

@@ -196,14 +196,19 @@ class VideoRenderer:
         if layout.mode == "split_screen" and layout.webcam_crop and layout.gameplay_crop:
             wc = layout.webcam_crop
             gc = layout.gameplay_crop
-            # Topo: webcam em 1080x674 + divisória de 6px = 680px | Base: gameplay em 1080x1240 -> 1080x1920
+            # Topo (Y=0..680): webcam close-up + linha divisória
+            # Base (Y=680..1920): fundo blur da gameplay + quadro principal 1080x930 preservando 100% da legenda
+            # de tradução do jogo na parte inferior (Y=1470..1610), acima da barra de botões do TikTok!
             return (
-                f"split=2[cam_src][gp_src];"
+                f"split=3[cam_src][gp_src][gp_bg_src];"
                 f"[cam_src]crop={wc.w}:{wc.h}:{wc.x}:{wc.y},scale=1080:674:flags=lanczos,"
                 f"eq=contrast=1.04:saturation=1.06,"
                 f"pad=1080:680:0:0:color=#0D0D0D[top];"
-                f"[gp_src]crop={gc.w}:{gc.h}:{gc.x}:{gc.y},scale=1080:1240:flags=lanczos,"
-                f"eq=contrast=1.04:saturation=1.05[bot];"
+                f"[gp_bg_src]crop={gc.w}:{gc.h}:{gc.x}:{gc.y},scale=1080:1240:force_original_aspect_ratio=increase,"
+                f"crop=1080:1240,boxblur=26:4,eq=brightness=-0.22[gp_bg];"
+                f"[gp_src]crop={gc.w}:{gc.h}:{gc.x}:{gc.y},scale=1080:930:flags=lanczos,"
+                f"eq=contrast=1.04:saturation=1.05[gp_fg];"
+                f"[gp_bg][gp_fg]overlay=0:0[bot];"
                 f"[top][bot]vstack=inputs=2,setsar=1"
             )
 

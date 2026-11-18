@@ -212,22 +212,16 @@ class LayoutAnalyzer:
 
     def _compute_gameplay_crop(self, src_w: int, src_h: int, cam_rect: CropRect) -> CropRect:
         """
-        Recorta o centro da ação/gameplay na proporção 1080:1240 (~0.871) para o painel inferior,
-        cortando os 9% inferiores da tela 16:9 (onde ficam barras de legenda automática de OBS do streamer).
+        Recorta o centro do jogo preservando 100% da altura (`0..src_h`) e ~65% da largura central (`aspect ~1.16`)
+        para manter a legenda de tradução inferior do jogo inteira e legível acima dos botões do TikTok.
         """
-        target_aspect = 1080.0 / 1240.0
-        gp_h = int(round(src_h * 0.905))
-        gp_h -= gp_h % 2
+        target_aspect = 1080.0 / 930.0
+        gp_h = src_h
         gp_w = int(round(gp_h * target_aspect))
         gp_w = min(src_w, gp_w - (gp_w % 2))
 
+        # Centraliza exatamente no meio horizontal (onde ficam as legendas de tradução do jogo)
         ideal_center_x = src_w // 2
-        cam_center_x = cam_rect.x + cam_rect.w // 2
-        if cam_center_x < src_w * 0.35:
-            ideal_center_x = int(src_w * 0.55)
-        elif cam_center_x > src_w * 0.65:
-            ideal_center_x = int(src_w * 0.45)
-
         gp_x = max(0, min(src_w - gp_w, ideal_center_x - gp_w // 2))
         return self._clamp_rect(gp_x, 0, gp_w, gp_h, src_w, src_h)
 

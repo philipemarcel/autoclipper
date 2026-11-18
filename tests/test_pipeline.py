@@ -179,6 +179,16 @@ def test_opus_ass_and_srt_generation(tmp_path: Path):
     assert "MANO" in ass_txt
     assert "1\n00:00:02,500" in srt_txt
 
+    # Garante matematicamente que NENHUMA legenda OpusCap sobreponha a seguinte no tempo
+    cap_lines = [ln for ln in ass_txt.splitlines() if ln.startswith("Dialogue: 2,")]
+    def _to_sec(ts: str) -> float:
+        h, m, s = ts.split(":")
+        return int(h) * 3600 + int(m) * 60 + float(s)
+
+    parsed_ranges = [(_to_sec(ln.split(",")[1]), _to_sec(ln.split(",")[2])) for ln in cap_lines]
+    for idx in range(len(parsed_ranges) - 1):
+        assert parsed_ranges[idx][1] <= parsed_ranges[idx + 1][0] + 1e-6
+
 
 def test_smart_drip_queue_spacing_and_quiet_hours(tmp_path: Path):
     store = DriveStore(mount_path=str(tmp_path / "drive"))
