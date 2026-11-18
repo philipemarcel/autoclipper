@@ -1,0 +1,8 @@
+name = "twitch-autocliper-discord"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+GITHUB_OWNER = "philipemarcel"
+GITHUB_REPO = "autoclipper"
+GITHUB_BRANCH = "main"

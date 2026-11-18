@@ -1,0 +1,37 @@
+{
+  "canvas_width": 1080,
+  "canvas_height": 1920,
+  "captions": {
+    "font_name": "Arial Black",
+    "font_size": 84,
+    "max_words_per_chunk": 2,
+    "max_chars_per_chunk": 16,
+    "pause_split_threshold_sec": 0.24,
+    "primary_text_hex": "#FFFFFF",
+    "upcoming_text_hex": "#C8C8C8",
+    "active_word_hex": "#FFE600",
+    "alt_active_word_hex": "#00FF66",
+    "hype_word_hex": "#FF3355",
+    "outline_hex": "#000000",
+    "shadow_hex": "#000000",
+    "outline_width": 8,
+    "shadow_depth": 5,
+    "split_screen_pos_y": 685,
+    "full_screen_pos_y": 1340,
+    "uppercase": true,
+    "active_word_scale_pct": 122
+  },
+  "teaser_headline": {
+    "enabled": true,
+    "font_name": "Arial Black",
+    "font_size": 68,
+    "text_hex": "#FFFFFF",
+    "accent_hex": "#FFE600",
+    "outline_hex": "#000000",
+    "outline_width": 9,
+    "shadow_depth": 6,
+    "split_screen_pos_y": 565,
+    "full_screen_pos_y": 340,
+    "max_chars_per_line": 18
+  }
+}

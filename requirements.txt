@@ -1,0 +1,27 @@
+# Core HTTP, Config & Utilities
+requests>=2.32.0
+PyYAML>=6.0.1
+python-dotenv>=1.0.1
+tenacity>=8.5.0
+tzdata>=2024.1
+
+# Twitch / Media Download
+yt-dlp>=2025.1.15
+imageio-ffmpeg>=0.5.1
+
+# AI (Gemini Director + Groq Whisper API)
+google-genai>=1.2.0
+
+# Computer Vision (Auto-Layout 9:16: Split-Screen / Face-Tracking / Blur)
+opencv-python-headless>=4.10.0.84
+numpy>=1.26.4
+mediapipe>=0.10.14; python_version < "3.13"
+
+# Google Drive API (20 TB Storage & State Sync)
+google-api-python-client>=2.149.0
+google-auth>=2.35.0
+google-auth-oauthlib>=1.2.1
+google-auth-httplib2>=0.2.0
+
+# Tests
+pytest>=8.3.0

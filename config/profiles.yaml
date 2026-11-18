@@ -1,0 +1,78 @@
+# ==============================================================================
+# PERFIS DE CRIADORES MONITORADOS
+# Comece com 1 criador hoje; para expandir depois, basta duplicar o bloco abaixo
+# em `profiles:` (apontando para as mesmas contas ou contas novas de Reels/TikTok).
+# ==============================================================================
+
+profiles:
+  - id: "criador_01"
+    enabled: true
+    # Login exato da URL na Twitch (ex: twitch.tv/alanzoka -> "alanzoka")
+    twitch_login: "alanzoka"
+    display_name: "Alanzoka"
+    language: "pt"
+
+    detection:
+      # Agrupa múltiplos clipes criados pela comunidade na mesma janela temporal (segundos)
+      cluster_window_seconds: 75
+      # Modo Quente (durante a live): dispara se N pessoas cliparem o mesmo minuto OU 1 clipe explodir
+      min_clips_live_cluster: 3
+      min_views_single_clip_live: 80
+      # Modo Repescagem (pós-live): pega os mais vistos da sessão encerrada sem repetir trechos
+      min_views_post_live: 120
+      # Alto volume: meta de 8 a 15 cortes por live
+      max_cuts_per_stream: 15
+      max_cuts_per_run: 4
+      # Evita gerar dois cortes sobrepostos do mesmo momento (segundos de distância mínima no VOD)
+      dedup_overlap_seconds: 50
+      # Folga de contexto extraída do VOD público antes e depois do pico (segundos)
+      vod_padding_before_seconds: 45
+      vod_padding_after_seconds: 45
+
+    editing:
+      # Travado em <= 58s (incluindo o Cold Open) para evitar mute automático de música acima de 60s no TikTok
+      max_duration_seconds: 58.0
+      min_duration_seconds: 16.0
+      # Cold Open (Teaser): 2-3s do clímax logo no segundo 00:00 antes da cena completa
+      cold_open_enabled: true
+      cold_open_min_main_duration: 22.0
+      cold_open_min_seconds: 2.0
+      cold_open_max_seconds: 3.2
+      # Auto-Layout 9:16: "auto" alterna sozinho entre split_screen, face_track e blur_center
+      layout_mode: "auto"
+      # Opcional: se quiser travar manualmente a caixa da webcam [x, y, w, h] em proporção 0.0-1.0, preencha aqui
+      fixed_webcam_box: null
+      # Sem marca d'água (100% limpo conforme definido)
+      watermark_text: ""
+
+    copy:
+      # 1 frase curta estilo meme/reação nativa da internet (sem perguntas robóticas) + 3-4 hashtags
+      style: "minimal_meme"
+      max_hashtags: 4
+      base_hashtags:
+        - "#cortes"
+        - "#live"
+        - "#twitchbr"
+
+    discord:
+      bot_token_env: "DISCORD_BOT_TOKEN"
+      channel_id_env: "DISCORD_CHANNEL_ID"
+
+    publishing:
+      # Fila Espaçada Inteligente: 1 post a cada 75 min (1h15) para não canibalizar alcance com 8-15 cortes
+      drip_interval_minutes: 75
+      # Horário de silêncio opcional na madrugada (BRT): evita queimar posts entre 03h e 09h (exceto botão "Postar Agora")
+      quiet_hours_brt: [3, 9]
+      timezone: "America/Sao_Paulo"
+
+      instagram:
+        enabled: true
+        account_id_env: "IG_ACCOUNT_ID"
+        access_token_env: "IG_ACCESS_TOKEN"
+
+      tiktok:
+        enabled: true
+        # "inbox" = cai pronto nos rascunhos/notificações do app TikTok sem exigir auditoria comercial
+        # "direct" = publica 100% direto no feed (ative quando seu app for aprovado no TikTok Developers)
+        mode: "inbox"
+        access_token_env: "TIKTOK_ACCESS_TOKEN"

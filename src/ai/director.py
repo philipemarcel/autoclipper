@@ -1,0 +1,354 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+from typing import Any, Dict, List, Optional
+
+import requests
+
+from src.models import DirectorDecision, MomentCluster, ProfileConfig, WordTimestamp
+
+logger = logging.getLogger(__name__)
+
+
+def build_transcript_lines(words: List[WordTimestamp], chunk_sec: float = 4.0) -> str:
+    """Agrupa palavras em linhas com timestamps claros para o Gemini decidir o corte cirúrgico."""
+    if not words:
+        return "(Sem falas detectadas — momento puramente visual ou grito/reação)"
+
+    lines: List[str] = []
+    bucket: List[WordTimestamp] = [words[0]]
+    for w in words[1:]:
+        if (w.end - bucket[0].start) <= chunk_sec and (w.start - bucket[-1].end) <= 0.8:
+            bucket.append(w)
+        else:
+            text = " ".join(x.word for x in bucket)
+            lines.append(f"[{bucket[0].start:05.2f}s - {bucket[-1].end:05.2f}s] {text}")
+            bucket = [w]
+    if bucket:
+        text = " ".join(x.word for x in bucket)
+        lines.append(f"[{bucket[0].start:05.2f}s - {bucket[-1].end:05.2f}s] {text}")
+    return "\n".join(lines)
+
+
+class GeminiDirector:
+    """
+    Diretor de Edição via Gemini:
+      - Escolhe `main_start` e `main_end` cirúrgicos removendo tempos mortos.
+      - Seleciona `teaser_start` e `teaser_end` (2.0s–3.2s do clímax) para o Cold Open no segundo 00:00.
+      - Cria a `teaser_headline` curta exibida só nos 2–3s iniciais.
+      - Cria a `caption_text` minimalista estilo meme/reação (sem perguntas robóticas) + 3–4 hashtags.
+      - Garante matematicamente que `teaser_duration + main_duration <= 58.0s` (anti-mute TikTok).
+    """
+
+    def __init__(
+        self,
+        profile: ProfileConfig,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+        groq_api_key: Optional[str] = None,
+    ) -> None:
+        self.profile = profile
+        self.api_key = (api_key if api_key is not None else os.getenv("GEMINI_API_KEY", "")).strip()
+        self.model_name = (model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")).strip()
+        self.groq_api_key = (groq_api_key if groq_api_key is not None else os.getenv("GROQ_API_KEY", "")).strip()
+        self.groq_model = os.getenv("GROQ_DIRECTOR_MODEL", "openai/gpt-oss-120b").strip()
+
+    def direct_cut(
+        self,
+        cluster: MomentCluster,
+        words: List[WordTimestamp],
+        raw_duration_sec: float,
+        peak_hint_sec: float,
+    ) -> DirectorDecision:
+        prompt = self._build_prompt(cluster, words, raw_duration_sec, peak_hint_sec)
+
+        # 1. Tenta Gemini quando chave AIza válida estiver configurada
+        if self.api_key and not self.api_key.startswith("AQ."):
+            try:
+                raw_decision = self._call_gemini(prompt)
+                return self.enforce_constraints(raw_decision, words, raw_duration_sec, peak_hint_sec)
+            except Exception as exc:
+                logger.warning("Gemini falhou (%s). Acionando motor LLM Groq 120B...", exc)
+
+        # 2. Motor LLM Groq (`openai/gpt-oss-120b`) — usa a mesma GROQ_API_KEY já configurada!
+        if self.groq_api_key:
+            try:
+                raw_decision = self._call_groq_llm(prompt)
+                return self.enforce_constraints(raw_decision, words, raw_duration_sec, peak_hint_sec)
+            except Exception as exc:
+                logger.warning("Groq LLM falhou (%s). Tentando fallback...", exc)
+
+        # 3. Se a chave Gemini começar com AQ., ainda tenta antes do fallback heurístico
+        if self.api_key:
+            try:
+                raw_decision = self._call_gemini(prompt)
+                return self.enforce_constraints(raw_decision, words, raw_duration_sec, peak_hint_sec)
+            except Exception as exc:
+                logger.warning("Chave Gemini AQ. não aceita no endpoint público (%s).", exc)
+
+        return self._fallback_decision(cluster, words, raw_duration_sec, peak_hint_sec)
+
+    def _build_prompt(
+        self,
+        cluster: MomentCluster,
+        words: List[WordTimestamp],
+        raw_duration_sec: float,
+        peak_hint_sec: float,
+    ) -> str:
+        clip_titles = list({c.title for c in cluster.clips if c.title})[:8]
+        transcript_block = build_transcript_lines(words)
+        edt = self.profile.editing
+
+        return f"""
+Você é um editor sênior de páginas virais brasileiras de cortes de lives no TikTok e Instagram Reels.
+
+DADOS DO MOMENTO NA TWITCH:
+- Criador: {self.profile.display_name} (@{self.profile.twitch_login})
+- Categoria/Jogo: {cluster.game_name or "Live"}
+- Título da Live: {cluster.stream_title or "N/A"}
+- Títulos que os espectadores deram aos clipes deste exato momento: {json.dumps(clip_titles, ensure_ascii=False)}
+- Duração total do vídeo bruto extraído: {raw_duration_sec:.2f}s
+- Ponto onde a comunidade mais clipou (pico aproximado): ~{peak_hint_sec:.1f}s
+
+TRANSCRIÇÃO COM TIMESTAMPS:
+{transcript_block}
+
+REGRAS OBRIGATÓRIAS DE EDIÇÃO:
+1. CORTE PRINCIPAL (`main_start` e `main_end`):
+   - Remova silêncios, enrolação ou fim de assuntos anteriores.
+   - Comece exatamente na frase de contexto/gancho que prepara o momento e termine logo após a reação/desfecho.
+   - A soma final (`teaser` + `corte principal`) NUNCA pode passar de {edt.max_duration_seconds:.1f} segundos (se usar teaser de ~2.8s, o corte principal deve ter no máximo ~55.0s).
+   - Mínimo desejado: {edt.min_duration_seconds:.1f}s (a menos que o vídeo bruto inteiro seja menor).
+2. COLD OPEN / TEASER (`cold_open_enabled`, `teaser_start`, `teaser_end`):
+   - Se o corte principal tiver pelo menos {edt.cold_open_min_main_duration:.0f}s e o clímax não estiver já nos primeiros 5s, ative `cold_open_enabled = true`.
+   - Escolha os {edt.cold_open_min_seconds:.1f}s a {edt.cold_open_max_seconds:.1f}s mais explosivos/engraçados do clímax dentro da janela para aparecerem no segundo 00:00.
+3. HEADLINE DO TEASER (`teaser_headline`):
+   - Máximo 4 a 5 palavras curtas que aparecem na tela nos 2-3s iniciais.
+   - Baseie-se LITERALMENTE no título que o espectador deu ao clipe (`{cluster.dominant_title}`) ou na frase mais engraçada dita na transcrição.
+   - PROIBIDO usar clichês genéricos de IA como "JOGADA DE OURO", "MOMENTO ÉPICO", "IMPERDÍVEL", "INACREDITÁVEL".
+4. COPY DE PÁGINA DE CORTES BR (`caption_text` e `hashtags`):
+   - `caption_text`: 1 única linha curta em caixa baixa, exatamente como páginas reais brasileiras de cortes da Twitch escrevem no TikTok/Reels.
+   - Use o próprio título do clipe da comunidade (`{cluster.dominant_title}`) adaptado de forma natural OU cite a reação/fala literal do streamer no vídeo (ex: "ele reclamando dos 30 fps no primeiro minuto de jogo kkkkk", "o primeiro roubo em vice city já deu tudo errado 💀").
+   - PROIBIDO usar frases artificiais de IA como "galera surtando", "segura essa", "deixou todo mundo de cara", "o que acharam?".
+   - `hashtags`: exatamente 3 ou 4 hashtags curtas (`["#{self.profile.twitch_login}", "#cortes", "#twitchbr"]` + tag do jogo).
+5. CORREÇÃO DE GRAFIA DO WHISPER (`word_corrections`):
+   - Se notar na transcrição alguma palavra claramente ouvida errado pelo Whisper (ex: nome de jogo, gíria ou palavra trocada), inclua no dicionário `"word_corrections": {{"palavra_errada": "palavra_certa"}}` (caso contrário, `{{}}`).
+
+Responda ESTRITAMENTE em JSON válido com as chaves:
+{{
+  "main_start": float,
+  "main_end": float,
+  "cold_open_enabled": bool,
+  "teaser_start": float,
+  "teaser_end": float,
+  "teaser_headline": string,
+  "caption_text": string,
+  "hashtags": [string],
+  "word_corrections": {{}},
+  "virality_score": int,
+  "reasoning": string
+}}
+""".strip()
+
+    def _call_gemini(self, prompt: str) -> Dict[str, Any]:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=self.api_key)
+        response = client.models.generate_content(
+            model=self.model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.35,
+            ),
+        )
+        text = (response.text or "").strip()
+        return json.loads(text)
+
+    def _call_groq_llm(self, prompt: str) -> Dict[str, Any]:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.groq_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.groq_model,
+                "temperature": 0.35,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Você é um diretor de cortes virais para TikTok e Reels. Responda apenas com um objeto JSON válido.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=45,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        return json.loads(content)
+
+    def enforce_constraints(
+        self,
+        raw: Dict[str, Any],
+        words: List[WordTimestamp],
+        raw_duration_sec: float,
+        peak_hint_sec: float,
+    ) -> DirectorDecision:
+        edt = self.profile.editing
+        max_total = min(edt.max_duration_seconds, raw_duration_sec)
+
+        main_start = max(0.0, min(raw_duration_sec - 2.0, float(raw.get("main_start", 0.0))))
+        main_end = max(main_start + 3.0, min(raw_duration_sec, float(raw.get("main_end", raw_duration_sec))))
+
+        # Aplica eventuais correções ortográficas identificadas pela IA nas palavras do Whisper
+        corrections = raw.get("word_corrections")
+        if isinstance(corrections, dict) and corrections and words:
+            norm_map = {str(k).strip().lower(): str(v).strip() for k, v in corrections.items() if str(k).strip() and str(v).strip()}
+            for w in words:
+                clean_token = re.sub(r"[^\wÀ-ÿ]", "", w.word).lower()
+                if clean_token in norm_map:
+                    w.word = norm_map[clean_token]
+
+        # Se o vídeo de origem já é um clipe nativo da Twitch (<= 55s), o espectador humano JÁ enquadrou
+        # o contexto (início da situação + reação final). Nunca deixamos a IA amputar o início ou o fim da história!
+        if raw_duration_sec <= 55.0:
+            first_word_start = words[0].start if words else 0.0
+            last_word_end = words[-1].end if words else raw_duration_sec
+            # Só permite cortar silêncio inicial antes da 1ª fala (máximo 2.5s) e silêncio final (máximo 1.5s)
+            max_allowed_start = min(2.5, max(0.0, first_word_start - 0.15))
+            min_allowed_end = max(raw_duration_sec - 1.5, min(raw_duration_sec, last_word_end + 0.25))
+            main_start = min(main_start, max_allowed_start)
+            main_end = max(main_end, min_allowed_end)
+
+        # Alinha às bordas das palavras para não decepar sílabas
+        if words and raw_duration_sec > 55.0:
+            near_start = [w for w in words if abs(w.start - main_start) <= 0.6]
+            if near_start:
+                w0 = min(near_start, key=lambda w: abs(w.start - main_start))
+                main_start = max(0.0, w0.start - 0.12)
+            near_end = [w for w in words if abs(w.end - main_end) <= 0.6]
+            if near_end:
+                w1 = min(near_end, key=lambda w: abs(w.end - main_end))
+                main_end = min(raw_duration_sec, w1.end + 0.22)
+
+        cold_open = bool(raw.get("cold_open_enabled", True)) and edt.cold_open_enabled
+        teaser_start = float(raw.get("teaser_start", 0.0))
+        teaser_end = float(raw.get("teaser_end", 0.0))
+
+        main_dur = main_end - main_start
+        if main_dur < edt.cold_open_min_main_duration or raw_duration_sec < edt.cold_open_min_main_duration:
+            cold_open = False
+
+        if cold_open:
+            # Garante que o teaser esteja numa região válida e tenha entre 2.0s e 3.2s
+            teaser_start = max(main_start + 4.0, min(main_end - edt.cold_open_min_seconds, teaser_start))
+            teaser_dur = max(edt.cold_open_min_seconds, min(edt.cold_open_max_seconds, teaser_end - teaser_start))
+            teaser_end = min(raw_duration_sec, teaser_start + teaser_dur)
+            if teaser_end - teaser_start < 1.6 or (teaser_start - main_start) < 3.5:
+                cold_open = False
+                teaser_start, teaser_end = 0.0, 0.0
+        else:
+            teaser_start, teaser_end = 0.0, 0.0
+
+        teaser_dur = (teaser_end - teaser_start) if cold_open else 0.0
+
+        # Trava matemática rígida <= 58.0s (incluindo o teaser!)
+        allowed_main = max(5.0, max_total - teaser_dur)
+        if (main_end - main_start) > allowed_main:
+            # Preserva o pico dentro da janela cortada
+            if main_start <= peak_hint_sec <= main_end:
+                ideal_start = max(main_start, peak_hint_sec - allowed_main * 0.68)
+                main_start = min(ideal_start, main_end - allowed_main)
+                main_end = main_start + allowed_main
+            else:
+                main_end = main_start + allowed_main
+
+        # Limpeza da copy minimalista (remove interrogações forçadas caso o modelo insista)
+        caption = str(raw.get("caption_text") or cluster_fallback_caption(self.profile)).strip()
+        caption = re.sub(r"\s+", " ", caption)
+        if "?" in caption and len(caption.split("?")) > 1:
+            first_part = caption.split("?")[0].strip()
+            if len(first_part) > 8 and not first_part.lower().startswith(("quem", "como", "por que", "qual")):
+                caption = first_part
+
+        raw_tags = [str(t).strip() for t in (raw.get("hashtags") or []) if str(t).strip()]
+        if not raw_tags:
+            raw_tags = [f"#{self.profile.twitch_login}"] + list(self.profile.copy.base_hashtags)
+        clean_tags: List[str] = []
+        for t in raw_tags:
+            tag = t if t.startswith("#") else f"#{t}"
+            tag = re.sub(r"[^\w#À-ÿ]", "", tag)
+            if tag and tag.lower() not in {x.lower() for x in clean_tags}:
+                clean_tags.append(tag)
+            if len(clean_tags) >= self.profile.copy.max_hashtags:
+                break
+
+        headline = str(raw.get("teaser_headline") or "").strip()
+        if cold_open and not headline:
+            headline = "OLHA O QUE ACONTECEU 💀"
+
+        return DirectorDecision(
+            main_start=round(main_start, 3),
+            main_end=round(main_end, 3),
+            cold_open_enabled=cold_open,
+            teaser_start=round(teaser_start, 3),
+            teaser_end=round(teaser_end, 3),
+            teaser_headline=headline[:48],
+            caption_text=caption,
+            hashtags=clean_tags,
+            virality_score=max(1, min(100, int(raw.get("virality_score", 75)))),
+            reasoning=str(raw.get("reasoning", "")),
+        )
+
+    def _fallback_decision(
+        self,
+        cluster: MomentCluster,
+        words: List[WordTimestamp],
+        raw_duration_sec: float,
+        peak_hint_sec: float,
+    ) -> DirectorDecision:
+        edt = self.profile.editing
+        cold_open = edt.cold_open_enabled and raw_duration_sec >= edt.cold_open_min_main_duration
+        teaser_len = 2.5 if cold_open else 0.0
+        target_main = min(raw_duration_sec, edt.max_duration_seconds - teaser_len)
+
+        start = max(0.0, min(raw_duration_sec - target_main, peak_hint_sec - target_main * 0.62))
+        end = min(raw_duration_sec, start + target_main)
+
+        t_start = max(start + 5.0, min(end - 2.6, peak_hint_sec)) if cold_open else 0.0
+        t_end = (t_start + 2.5) if cold_open else 0.0
+        if cold_open and (t_end > end or (t_start - start) < 4.0):
+            cold_open = False
+            t_start, t_end = 0.0, 0.0
+
+        title_clean = (cluster.dominant_title or "simplesmente intancável esse momento").strip()
+        tags = [f"#{self.profile.twitch_login}"] + list(self.profile.copy.base_hashtags)
+
+        return self.enforce_constraints(
+            {
+                "main_start": start,
+                "main_end": end,
+                "cold_open_enabled": cold_open,
+                "teaser_start": t_start,
+                "teaser_end": t_end,
+                "teaser_headline": title_clean.upper()[:42] if cold_open else "",
+                "caption_text": title_clean.lower(),
+                "hashtags": tags[: self.profile.copy.max_hashtags],
+                "virality_score": int(min(95, max(60, cluster.score))),
+                "reasoning": "Fallback centrado no pico de clipes da comunidade.",
+            },
+            words=words,
+            raw_duration_sec=raw_duration_sec,
+            peak_hint_sec=peak_hint_sec,
+        )
+
+
+def cluster_fallback_caption(profile: ProfileConfig) -> str:
+    return f"momento absurdo na live do {profile.display_name.lower()}"
