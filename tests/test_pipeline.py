@@ -739,7 +739,7 @@ def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):
     prompt = director._build_prompt(cl, [WordTimestamp("bora", 1.0, 1.5)], 40.0, 20.0)
     assert "kscerato" in prompt
     assert "Google Trends tempo real" in prompt
-    assert "contando O QUE ESTÁ ACONTECENDO" in prompt
+    assert "DESCRIÇÃO COMPACTA, DESCRITIVA E COM GANCHO" in prompt
 
     # Garante que chamadas robóticas de engajamento sejam limpas sem amputar frases narrativas reais
     dec = director.enforce_constraints(

@@ -54,8 +54,8 @@ profiles:
       watermark_text: ""
 
     copy:
-      # Descrição envolvente contando o que está acontecendo na cena + 4-5 hashtags em alta no momento
-      style: "story_hook"
+      # Descrição compacta (40-85 chars) descrevendo a cena + gancho, com 4-5 hashtags em alta no momento
+      style: "compact_hook"
       max_hashtags: 5
       base_hashtags:
         - "#fy"

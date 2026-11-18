@@ -183,14 +183,18 @@ REGRAS OBRIGATÓRIAS DE EDIÇÃO:
    - Máximo 4 a 5 palavras curtas que aparecem na tela nos 2-3s iniciais.
    - Baseie-se LITERALMENTE no título/assunto do momento (`{cluster.dominant_title}`) ou na frase mais engraçada dita na transcrição.
    - PROIBIDO usar clichês genéricos de IA como "JOGADA DE OURO", "MOMENTO ÉPICO", "IMPERDÍVEL", "INACREDITÁVEL".
-4. DESCRIÇÃO ENVOLVENTE DO VÍDEO (`caption_text` e `hashtags`):
-   - `caption_text`: escreva uma descrição interessante e envolvente (1 a 2 frases curtas, máximo ~220 caracteres) **contando O QUE ESTÁ ACONTECENDO na cena** — quem participa (`{creator_name}`), qual é a situação/reviravolta/treta do corte e o que torna o momento engraçado ou curioso para prender quem vê no feed.
-   - Estruture com clareza narrativa (contexto real tirado da transcrição e dos títulos acima + gancho de curiosidade natural). Pode usar 1 emoji pertinente no máximo se combinar com o tom.
+4. DESCRIÇÃO COMPACTA, DESCRITIVA E COM GANCHO (`caption_text` e `hashtags`):
+   - `caption_text`: escreva **1 única frase curta e direta (ENTRE `40` E `85` CARACTERES no máximo — sem textão!)** explicando **o fato específico** da cena + **um gancho que dê vontade de assistir até o fim**.
+   - Seja concreto com os detalhes reais da transcrição/título (ex.: o objeto, jogo, pessoa ou erro exato), **sem entregar a punchline inteira** e sem precisar de 2 frases longas. Pode usar no máximo 1 emoji se combinar.
    - ESTRITAMENTE PROIBIDO:
-     * Copiar uma fala solta ou frase aleatória fora de contexto (ex. RUIM: `"não conhece nada, galera"`, `"caralho que porra"`, `"mendy me deixou doido, quem é você"`).
-     * Clichês artificiais de IA ou chamadas genéricas (ex. RUIM: `"galera surtando"`, `"segura essa"`, `"deixou todo mundo de cara"`, `"vocês não vão acreditar"`, `"o que acharam? comenta aí!"`).
-   - Exemplo de BOM resultado: `"Davy Jones tenta improvisar como encanador no meio do serviço e transforma uma tarefa simples num caos completo 😂"` ou `"Alanzoka achou que tinha escapado da maldição do jogo até o dinossauro aparecer bem atrás dele 💀"`.
-   - `hashtags`: exatamente 4 ou {self.profile.copy.max_hashtags} hashtags focadas no que pode **ficar em alta neste momento** (ex: {default_tags}):
+     * Enrolação genérica de IA (ex. RUIM: `"tenta X, mas acaba atrapalhando tudo"`, `"a situação vira risada total"`, `"transforma num caos completo"`, `"deixou todo mundo sem reação"`, `"galera surtando"`).
+     * Textão acima de `85` caracteres (tem que caber antes do *"Ver mais"* no TikTok/Reels).
+     * Fala avulsa sem explicar a cena (ex. RUIM: `"não conhece nada, galera"`, `"vai ser muito foda"`).
+   - Exemplos de BOM tamanho e gancho (varie a estrutura conforme a cena):
+     * `"Alanzoka parou o carro errado e se arrependeu na hora 👀"`
+     * `"O momento em que o Bistecone quase perdeu o PS5 ao vivo 💀"`
+     * `"Davy Jones foi bancar o encanador e olha no que deu 😂"`
+   - `hashtags`: de 3 a {self.profile.copy.max_hashtags} hashtags focadas no que pode **ficar em alta neste momento** (ex: {default_tags}):
      1) criador/participante em evidência (`#{creator_handle}`),
      2) 1 ou 2 tags específicas do assunto/jogo/meme citado (e se algum tema em alta do Google Trends acima tiver ligação real com o clipe, inclua obrigatoriamente!),
      3) 1 ou 2 tags fortes de descoberta/alcance no algoritmo (`#fy`, `#fyp`, `#viral`, `#react`, `#clips`). Evite tags genéricas mortas ou que não combinem com a plataforma.
@@ -342,7 +346,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             else:
                 main_end = main_start + allowed_main
 
-        # Limpeza da descrição (normaliza espaços e remove eventuais chamadas robóticas de engajamento no fim)
+        # Limpeza da descrição compacta (remove enchimento genérico de IA e mantém <= 115 chars)
         caption = str(raw.get("caption_text") or cluster_fallback_caption(self.profile)).strip()
         caption = re.sub(r"\s+", " ", caption)
         caption = re.sub(
@@ -351,8 +355,10 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             caption,
             flags=re.IGNORECASE,
         ).strip()
-        if len(caption) > 260:
-            caption = caption[:257].rstrip(" ,;:") + "..."
+        if len(caption) > 115:
+            # Tenta manter até a primeira oração completa antes de alongar
+            cut_pos = caption.rfind(" ", 0, 112)
+            caption = caption[: (cut_pos if cut_pos > 45 else 112)].rstrip(" ,;:") + "..."
 
         raw_tags = [str(t).strip() for t in (raw.get("hashtags") or []) if str(t).strip()]
         if not raw_tags:
