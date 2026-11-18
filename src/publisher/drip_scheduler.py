@@ -50,6 +50,100 @@ class DripScheduler:
     def _save_queue_state(self, state: Dict[str, Any]) -> None:
         self.store.save_state_json(DRIP_STATE_FILE, state)
 
+    def get_effective_interval_minutes(
+        self,
+        profile: ProfileConfig,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        q_state = state if state is not None else self._load_queue_state()
+        override = q_state.get("drip_interval_override_minutes")
+        if override is not None:
+            try:
+                return max(5, min(1440, int(override)))
+            except (TypeError, ValueError):
+                pass
+        return max(5, int(profile.publishing.drip_interval_minutes))
+
+    @staticmethod
+    def get_effective_quiet_hours(
+        profile: ProfileConfig,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Optional[List[int]]:
+        if state and "quiet_hours_override" in state:
+            ov = state.get("quiet_hours_override")
+            if not ov or len(ov) != 2:
+                return None
+            return [int(ov[0]), int(ov[1])]
+        return profile.publishing.quiet_hours_brt
+
+    def update_timer_override(
+        self,
+        profiles_by_id: Dict[str, ProfileConfig],
+        interval_minutes: int,
+        quiet_hours_str: str = "",
+        now_utc: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """
+        Atualiza o intervalo da Fila Espaçada (em minutos) diretamente em `drip_queue.json`
+        e recalcula os horários dos itens ainda `pending` na fila.
+        """
+        now = now_utc or datetime.now(timezone.utc)
+        state = self._load_queue_state()
+        new_interval = max(5, min(1440, int(interval_minutes)))
+        state["drip_interval_override_minutes"] = new_interval
+
+        clean_qh = str(quiet_hours_str or "").strip().lower()
+        if clean_qh:
+            if clean_qh in {"off", "desativar", "desativado", "none", "nao", "não", "0"}:
+                state["quiet_hours_override"] = []
+            elif clean_qh in {"default", "padrao", "padrão", "reset"}:
+                state.pop("quiet_hours_override", None)
+            elif "-" in clean_qh:
+                parts = clean_qh.replace("h", "").split("-", 1)
+                try:
+                    h0 = max(0, min(23, int(parts[0].strip())))
+                    h1 = max(0, min(23, int(parts[1].strip())))
+                    state["quiet_hours_override"] = [h0, h1]
+                except ValueError:
+                    pass
+
+        delta = timedelta(minutes=new_interval)
+        pending_items = [it for it in state.get("items", []) if it.get("status") == "pending"]
+        pending_items.sort(key=lambda it: str(it.get("created_at") or it.get("scheduled_for") or ""))
+
+        cursor_by_profile: Dict[str, datetime] = {}
+        rescheduled = 0
+        next_local = ""
+
+        for item in pending_items:
+            pid = str(item.get("profile_id") or "")
+            prof = profiles_by_id.get(pid)
+            if not prof:
+                continue
+            tz = ZoneInfo(prof.publishing.timezone)
+            quiet_hours = self.get_effective_quiet_hours(prof, state)
+
+            if pid not in cursor_by_profile:
+                last_pub = state.get("last_published_by_profile", {}).get(pid)
+                base_dt = max(now, _parse_iso(last_pub) + delta) if last_pub else now
+            else:
+                base_dt = max(now, cursor_by_profile[pid] + delta)
+
+            slot = self._push_past_quiet_hours(base_dt, quiet_hours, tz)
+            cursor_by_profile[pid] = slot
+            item["scheduled_for"] = _to_iso_utc(slot)
+            rescheduled += 1
+            if not next_local:
+                next_local = slot.astimezone(tz).strftime("%d/%m às %H:%M")
+
+        self._save_queue_state(state)
+        return {
+            "interval_minutes": new_interval,
+            "quiet_hours": state.get("quiet_hours_override", "default"),
+            "rescheduled_count": rescheduled,
+            "next_scheduled_local": next_local,
+        }
+
     def compute_next_slot(
         self,
         profile: ProfileConfig,
@@ -60,7 +154,9 @@ class DripScheduler:
         Calcula `(scheduled_utc, is_immediate)`.
         """
         now = now_utc or datetime.now(timezone.utc)
-        interval = timedelta(minutes=max(15, profile.publishing.drip_interval_minutes))
+        eff_minutes = self.get_effective_interval_minutes(profile, state)
+        interval = timedelta(minutes=max(5, eff_minutes))
+        quiet_hours = self.get_effective_quiet_hours(profile, state)
         tz = ZoneInfo(profile.publishing.timezone)
 
         last_pub_iso = state.get("last_published_by_profile", {}).get(profile.id)
@@ -77,7 +173,7 @@ class DripScheduler:
             anchors.append(max(pending_for_profile) + interval)
 
         candidate = max([now] + anchors)
-        candidate = self._push_past_quiet_hours(candidate, profile.publishing.quiet_hours_brt, tz)
+        candidate = self._push_past_quiet_hours(candidate, quiet_hours, tz)
         is_immediate = (candidate - now).total_seconds() <= 30
         return candidate, is_immediate
 

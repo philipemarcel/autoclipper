@@ -226,11 +226,82 @@ export default {
       });
     }
 
-    // 3. Clique em botão interativo (`MESSAGE_COMPONENT`)
+    // 2b. Comando Slash `/fila` enviado no chat do Discord (`APPLICATION_COMMAND`)
+    if (interaction.type === 2 && interaction.data?.name === "fila") {
+      const opts = {};
+      for (const opt of interaction.data.options || []) {
+        opts[opt.name] = opt.value;
+      }
+      const minutes = String(opts.minutos || 75).trim();
+      const quietOpt = String(opts.silencio || "").trim();
+      const username = interaction.member?.user?.username || interaction.user?.username || "admin";
+
+      ctx.waitUntil(
+        dispatchWorkflow(env, "discord_action.yml", {
+          action: "set_drip_interval",
+          cut_id: "timer",
+          max_cuts: minutes,
+          time_range: quietOpt,
+          actor: username,
+        })
+      );
+
+      const quietTxt = quietOpt ? ` • Silêncio: \`${quietOpt}\`` : "";
+      return Response.json({
+        type: 4,
+        data: {
+          content: `⏱️ **Novo timer de fila pedido por \`${username}\`:** \`${minutes} min\`${quietTxt}\n⏳ *Salvando no Drive e recalculando eventuais cortes pendentes...*`,
+        },
+      });
+    }
+
+    // 3. Clique em botão interativo ou seleção de menu (`MESSAGE_COMPONENT`)
     if (interaction.type === 3 && interaction.data?.custom_id) {
       const [action, cutId] = interaction.data.custom_id.split(":");
       const username = interaction.member?.user?.username || interaction.user?.username || "admin";
       const messageId = interaction.message?.id || "";
+
+      if (action === "set_timer") {
+        const chosenMin = String(interaction.data?.values?.[0] || "75");
+        ctx.waitUntil(
+          dispatchWorkflow(env, "discord_action.yml", {
+            action: "set_drip_interval",
+            cut_id: cutId || "timer",
+            discord_message_id: messageId,
+            max_cuts: chosenMin,
+            actor: username,
+          })
+        );
+
+        const updatedComponents = (interaction.message?.components || []).map((row) => ({
+          ...row,
+          components: (row.components || []).map((comp) => {
+            if (comp.type === 2 && typeof comp.label === "string" && comp.label.includes("Fila ")) {
+              return { ...comp, label: comp.label.replace(/Fila \d+m/i, `Fila ${chosenMin}m`) };
+            }
+            if (comp.type === 3 && String(comp.custom_id || "").startsWith("set_timer:")) {
+              return {
+                ...comp,
+                placeholder: `⏱️ Timer da fila: ${chosenMin}m (salvando...)`,
+                options: (comp.options || []).map((o) => ({
+                  ...o,
+                  default: String(o.value) === chosenMin,
+                })),
+              };
+            }
+            return comp;
+          }),
+        }));
+
+        return Response.json({
+          type: 7,
+          data: {
+            content: interaction.message?.content || "",
+            embeds: interaction.message?.embeds || [],
+            components: updatedComponents,
+          },
+        });
+      }
 
       if (action === "copy_caption") {
         const fields = interaction.message?.embeds?.[0]?.fields || [];

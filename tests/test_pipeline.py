@@ -668,3 +668,96 @@ def test_kick_url_parsing_moment_discovery_and_director(monkeypatch):
     vod_cluster = MomentCluster(**{**live_clusters[0].__dict__, "mode": "kick_vod"})
     d_vod = director.direct_cut(vod_cluster, words, raw_duration_sec=60.0, peak_hint_sec=30.0)
     assert 14.0 <= d_vod.main_start <= 16.0 and 49.0 <= d_vod.main_end <= 51.0
+
+
+def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):
+    from src.ai import trending_hashtags as th
+
+    monkeypatch.setattr(th, "fetch_brazil_realtime_trends", lambda limit=20: ["kscerato", "cartola", "trailer novo"])
+    monkeypatch.setattr("src.ai.director.fetch_brazil_realtime_trends", lambda limit=15: ["kscerato", "cartola"])
+
+    tags = th.suggest_dynamic_hashtags(
+        creator_handle="davyjones",
+        platform_mode="youtube_auto",
+        game_name="Counter-Strike 2",
+        title_text="Kscerato deu aula nesse clutch absurdo",
+        transcript_snippet="olha o kscerato jogando",
+        max_tags=5,
+        base_discovery_tags=["#fy", "#fyp", "#viral"],
+    )
+    assert tags[0] == "#davyjones"
+    assert "#cs2" in tags
+    assert "#kscerato" in tags
+    assert "#fy" in tags
+    assert "#twitchbr" not in tags
+
+    prof = _make_profile()
+    director = GeminiDirector(prof, api_key="")
+    cl = MomentCluster(
+        cluster_id="c_tr",
+        profile_id=prof.id,
+        broadcaster_login="davyjones",
+        stream_or_vod_key="yt_1",
+        mode="youtube_auto",
+        clips=[TwitchClip("c1", "https://youtu.be/x", "kscerato clip", 100, "", 40.0, "davy", "yt", "Davy")],
+        video_id="yt_1",
+        vod_start_offset=10,
+        vod_end_offset=50,
+        peak_offset=30,
+        unique_clippers=1,
+        total_views=100,
+        max_views=100,
+        score=90.0,
+        dominant_title="kscerato",
+        game_name="Counter-Strike",
+    )
+    prompt = director._build_prompt(cl, [WordTimestamp("bora", 1.0, 1.5)], 40.0, 20.0)
+    assert "kscerato" in prompt
+    assert "Google Trends tempo real" in prompt
+
+
+def test_drip_timer_override_and_discord_select_menu(tmp_path: Path):
+    from src.approval.discord_notifier import DiscordNotifier
+
+    store = DriveStore(mount_path=str(tmp_path / "drive_timer"))
+    prof = _make_profile()
+    prof.publishing.drip_interval_minutes = 75
+    prof.publishing.quiet_hours_brt = [3, 9]
+    scheduler = DripScheduler(store)
+
+    now = datetime(2026, 11, 18, 18, 0, 0, tzinfo=timezone.utc)
+    state = {
+        "last_published_by_profile": {prof.id: "2026-11-18T17:50:00Z"},
+        "items": [
+            {"cut_id": "cut_a", "profile_id": prof.id, "platforms": ["tiktok"], "scheduled_for": "2026-11-18T19:05:00Z", "status": "pending", "created_at": "2026-11-18T17:55:00Z"},
+            {"cut_id": "cut_b", "profile_id": prof.id, "platforms": ["tiktok"], "scheduled_for": "2026-11-18T20:20:00Z", "status": "pending", "created_at": "2026-11-18T17:58:00Z"},
+        ],
+    }
+    store.save_state_json("drip_queue.json", state)
+
+    report = scheduler.update_timer_override(
+        profiles_by_id={prof.id: prof},
+        interval_minutes=20,
+        quiet_hours_str="desativar",
+        now_utc=now,
+    )
+    assert report["interval_minutes"] == 20
+    assert report["rescheduled_count"] == 2
+
+    reloaded = store.load_state_json("drip_queue.json", default={})
+    assert reloaded["drip_interval_override_minutes"] == 20
+    # last_pub=17:50 + 20m = 18:10 UTC; item 2 = 18:30 UTC
+    assert reloaded["items"][0]["scheduled_for"] == "2026-11-18T18:10:00Z"
+    assert reloaded["items"][1]["scheduled_for"] == "2026-11-18T18:30:00Z"
+
+    # Próximo slot também respeita 20m mesmo em horário de madrugada pois silêncio foi desativado
+    madrugada_utc = datetime(2026, 11, 19, 7, 30, 0, tzinfo=timezone.utc)
+    slot_mad, imm_mad = scheduler.compute_next_slot(prof, {"last_published_by_profile": {}, "items": [], "drip_interval_override_minutes": 20, "quiet_hours_override": []}, now_utc=madrugada_utc)
+    assert imm_mad is True
+    assert slot_mad == madrugada_utc
+
+    rows = DiscordNotifier._build_action_rows("cut_a", drip_min=20, ig_enabled=False, tt_enabled=True)
+    assert len(rows) == 3
+    assert "Fila 20m" in rows[0]["components"][0]["label"]
+    assert rows[2]["components"][0]["custom_id"] == "set_timer:cut_a"
+    assert "atual: 20m" in rows[2]["components"][0]["placeholder"]

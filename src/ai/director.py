@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from src.ai.trending_hashtags import fetch_brazil_realtime_trends, suggest_dynamic_hashtags
 from src.models import DirectorDecision, MomentCluster, ProfileConfig, WordTimestamp
 
 logger = logging.getLogger(__name__)
@@ -122,11 +123,14 @@ class GeminiDirector:
         creator_handle = cluster.broadcaster_login or self.profile.twitch_login
         platform_label = "YouTube" if is_youtube else ("Kick" if is_kick else "Twitch")
         if is_youtube:
-            default_tags = f'["#{creator_handle}", "#cortes", "#youtube", "#shorts"]'
+            default_tags = f'["#{creator_handle}", "#fy", "#fyp", "#viral", "#cortes"]'
         elif is_kick:
-            default_tags = f'["#{creator_handle}", "#cortes", "#kick", "#live"]'
+            default_tags = f'["#{creator_handle}", "#fy", "#fyp", "#viral", "#kick"]'
         else:
-            default_tags = f'["#{creator_handle}", "#cortes", "#twitchbr"]'
+            default_tags = f'["#{creator_handle}", "#fy", "#fyp", "#viral", "#cortes"]'
+
+        live_trends = fetch_brazil_realtime_trends(limit=15)
+        trends_hint = ", ".join(live_trends) if live_trends else "(indisponível no momento)"
 
         return f"""
 Você é um editor sênior de páginas virais brasileiras de cortes de lives no TikTok e Instagram Reels.
@@ -136,6 +140,7 @@ DADOS DO MOMENTO ({platform_label}):
 - Categoria/Jogo: {cluster.game_name or "Live"}
 - Título da Live/Vídeo: {cluster.stream_title or "N/A"}
 - Títulos/temas deste momento: {json.dumps(clip_titles, ensure_ascii=False)}
+- Assuntos EM ALTA AGORA NO BRASIL (Google Trends tempo real): {trends_hint}
 - Duração total do vídeo bruto extraído: {raw_duration_sec:.2f}s
 - Ponto principal aproximado: ~{peak_hint_sec:.1f}s
 
@@ -160,7 +165,10 @@ REGRAS OBRIGATÓRIAS DE EDIÇÃO:
    - `caption_text`: 1 única linha curta em caixa baixa, exatamente como páginas reais brasileiras de cortes escrevem no TikTok/Reels.
    - Use o assunto real deste vídeo do criador `{creator_name}` adaptado de forma natural OU cite a reação/fala literal do criador no vídeo.
    - PROIBIDO usar frases artificiais de IA como "galera surtando", "segura essa", "deixou todo mundo de cara", "o que acharam?".
-   - `hashtags`: exatamente 3 ou 4 hashtags curtas correspondentes ao criador `{creator_handle}` e ao assunto (ex: {default_tags}).
+   - `hashtags`: exatamente 4 ou {self.profile.copy.max_hashtags} hashtags focadas no que pode **ficar em alta neste momento** (ex: {default_tags}):
+     1) criador/participante em evidência (`#{creator_handle}`),
+     2) 1 ou 2 tags específicas do assunto/jogo/meme citado (e se algum tema em alta do Google Trends acima tiver ligação real com o clipe, inclua obrigatoriamente!),
+     3) 1 ou 2 tags fortes de descoberta/alcance no algoritmo (`#fy`, `#fyp`, `#viral`, `#react`, `#clips`). Evite tags genéricas mortas ou que não combinem com a plataforma.
 5. CORREÇÃO DE GRAFIA DO WHISPER (`word_corrections`):
    - Se notar na transcrição alguma palavra claramente ouvida errado pelo Whisper (ex: nome de jogo, gíria ou palavra trocada), inclua no dicionário `"word_corrections": {{"palavra_errada": "palavra_certa"}}` (caso contrário, `{{}}`).
 
@@ -302,7 +310,11 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
 
         raw_tags = [str(t).strip() for t in (raw.get("hashtags") or []) if str(t).strip()]
         if not raw_tags:
-            raw_tags = [f"#{self.profile.twitch_login}"] + list(self.profile.copy.base_hashtags)
+            raw_tags = suggest_dynamic_hashtags(
+                creator_handle=self.profile.twitch_login,
+                max_tags=self.profile.copy.max_hashtags,
+                base_discovery_tags=self.profile.copy.base_hashtags,
+            )
         clean_tags: List[str] = []
         for t in raw_tags:
             tag = t if t.startswith("#") else f"#{t}"
@@ -352,7 +364,16 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             t_start, t_end = 0.0, 0.0
 
         title_clean = (cluster.dominant_title or "simplesmente intancável esse momento").strip()
-        tags = [f"#{self.profile.twitch_login}"] + list(self.profile.copy.base_hashtags)
+        transcript_hint = " ".join(w.word for w in words[:40])
+        tags = suggest_dynamic_hashtags(
+            creator_handle=cluster.broadcaster_login or self.profile.twitch_login,
+            platform_mode=cluster.mode,
+            game_name=cluster.game_name,
+            title_text=f"{cluster.stream_title} {cluster.dominant_title}",
+            transcript_snippet=transcript_hint,
+            max_tags=self.profile.copy.max_hashtags,
+            base_discovery_tags=self.profile.copy.base_hashtags,
+        )
 
         return self.enforce_constraints(
             {

@@ -39,7 +39,28 @@ COMMANDS_PAYLOAD = [
                 "required": False,
             },
         ],
-    }
+    },
+    {
+        "name": "fila",
+        "description": "Altera o timer (intervalo em minutos) da Fila Espaçada direto no Discord",
+        "type": 1,
+        "options": [
+            {
+                "name": "minutos",
+                "description": "Intervalo entre postagens em minutos (5 a 1440, ex: 15, 30, 60, 90, 120)",
+                "type": 4,  # INTEGER
+                "required": True,
+                "min_value": 5,
+                "max_value": 1440,
+            },
+            {
+                "name": "silencio",
+                "description": "Opcional: horário sem postar (ex: 03-09, desativar, padrao)",
+                "type": 3,  # STRING
+                "required": False,
+            },
+        ],
+    },
 ]
 
 

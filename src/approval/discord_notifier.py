@@ -37,7 +37,12 @@ class DiscordNotifier:
     def is_configured(self) -> bool:
         return bool(self.bot_token and self.channel_id)
 
-    def send_cut_for_approval(self, cut: CutRecord, preview_video_path: Path) -> str:
+    def send_cut_for_approval(
+        self,
+        cut: CutRecord,
+        preview_video_path: Path,
+        drip_interval_override: Optional[int] = None,
+    ) -> str:
         if not self.is_configured:
             logger.warning("Discord não configurado (DISCORD_BOT_TOKEN/DISCORD_CHANNEL_ID ausentes). Pulando envio.")
             return ""
@@ -60,7 +65,11 @@ class DiscordNotifier:
         else:
             mode_badge = "🏁 REPESCAGEM PÓS-LIVE"
         audio_badge = "🔇 Voz Isolada (Sem Música)" if cut.audio_cleaned else "🎵 Áudio Original"
-        drip_min = self.profile.publishing.drip_interval_minutes
+        drip_min = (
+            int(drip_interval_override)
+            if drip_interval_override is not None
+            else self.profile.publishing.drip_interval_minutes
+        )
 
         embed = {
             "title": f"{mode_badge} • @{cut.twitch_login} (Score {cut.score:.0f})",
@@ -234,7 +243,28 @@ class DiscordNotifier:
             }
         )
 
+        timer_options = [
+            {"label": f"⏱️ {m} minutos", "value": str(m), "default": m == drip_min}
+            if m < 60
+            else {"label": f"⏱️ {m} minutos ({m // 60}h{f'{m % 60:02d}' if m % 60 else ''})", "value": str(m), "default": m == drip_min}
+            for m in (15, 30, 45, 60, 75, 90, 120, 180)
+        ]
+        row3_select = {
+            "type": 1,
+            "components": [
+                {
+                    "type": 3,
+                    "custom_id": f"set_timer:{cut_id}",
+                    "placeholder": f"⏱️ Mudar timer da fila (atual: {drip_min}m) ou use /fila",
+                    "min_values": 1,
+                    "max_values": 1,
+                    "options": timer_options,
+                }
+            ],
+        }
+
         return [
             {"type": 1, "components": row1_buttons},
             {"type": 1, "components": row2_buttons},
+            row3_select,
         ]

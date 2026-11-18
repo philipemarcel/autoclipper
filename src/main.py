@@ -171,7 +171,12 @@ def process_single_cluster(
 
         # 8. Envia prévia (<9 MB) + botões de 1 clique no Discord
         notifier = DiscordNotifier(profile)
-        msg_id = notifier.send_cut_for_approval(record, rendered.discord_preview_mp4)
+        active_drip_min = DripScheduler(store).get_effective_interval_minutes(profile)
+        msg_id = notifier.send_cut_for_approval(
+            record,
+            rendered.discord_preview_mp4,
+            drip_interval_override=active_drip_min,
+        )
         record.discord_message_id = msg_id
         meta_dict["discord_message_id"] = msg_id
 
@@ -454,12 +459,38 @@ def cmd_discord_action(
 ) -> None:
     if action == "youtube_cut":
         if not youtube_url.strip():
-            raise ValueError("URL do YouTube obrigatória para a ação youtube_cut.")
+            raise ValueError("URL obrigatória para a ação youtube_cut.")
         cmd_youtube(url=youtube_url.strip(), max_cuts=max_cuts, time_range=time_range)
         return
 
     store = DriveStore()
     profiles = {p.id: p for p in load_profiles(only_enabled=False)}
+
+    if action == "set_drip_interval":
+        new_minutes = max(5, min(1440, int(max_cuts)))
+        report = DripScheduler(store).update_timer_override(
+            profiles_by_id=profiles,
+            interval_minutes=new_minutes,
+            quiet_hours_str=time_range,
+        )
+        default_prof = next(iter(profiles.values()), None)
+        if default_prof:
+            quiet_info = (
+                "desativado"
+                if report["quiet_hours"] == []
+                else (f"{report['quiet_hours'][0]:02d}h–{report['quiet_hours'][1]:02d}h BRT" if isinstance(report["quiet_hours"], list) and len(report["quiet_hours"]) == 2 else "padrão do perfil")
+            )
+            recalc_note = (
+                f" • `{report['rescheduled_count']}` corte(s) na fila recalculado(s) (próximo: **{report['next_scheduled_local']} BRT**)"
+                if report["rescheduled_count"] > 0
+                else ""
+            )
+            DiscordNotifier(default_prof).post_status_reply(
+                discord_message_id,
+                f"⏱️ **Timer da Fila Espaçada salvo em `{report['interval_minutes']} min`!** (Silêncio madrugada: `{quiet_info}`){recalc_note}",
+            )
+        return
+
     processed_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
 
     cut_dict = next((c for c in processed_state.get("cuts", []) if c.get("cut_id") == cut_id), None)
@@ -511,7 +542,8 @@ def cmd_discord_action(
 
             rec_fields = {k: v for k, v in cut_dict.items() if k in CutRecord.__dataclass_fields__}
             rec = CutRecord(**rec_fields)
-            new_msg_id = notifier.send_cut_for_approval(rec, preview_mp4)
+            active_drip_min = DripScheduler(store).get_effective_interval_minutes(profile)
+            new_msg_id = notifier.send_cut_for_approval(rec, preview_mp4, drip_interval_override=active_drip_min)
             cut_dict["discord_message_id"] = new_msg_id
             store.save_state_json(PROCESSED_STATE_FILE, processed_state)
             return
