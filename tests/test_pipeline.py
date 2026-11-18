@@ -806,12 +806,16 @@ def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):
     prompt = director._build_prompt(cl, [WordTimestamp("bora", 1.0, 1.5)], 40.0, 20.0)
     assert "kscerato" in prompt
     assert "Google Trends tempo real" in prompt
-    assert "REFERÊNCIAS REAIS DE LEGENDAS DE CLIPS DE JOGOS NA WEB" in prompt
-    assert "DAVY JONES PIROU NO CS2!" in prompt
     assert "#cortesdegames" in prompt
-    assert "DESCRIÇÃO COMPACTA, DESCRITIVA E COM GANCHO" in prompt
+    assert "COPY DE PÁGINA DE CORTES BR" in prompt
+    assert "1 única linha curta em caixa baixa" in prompt
+    assert "REFERÊNCIAS REAIS DE LEGENDAS DE CLIPS DE JOGOS NA WEB" not in prompt
 
-    # Garante que chamadas robóticas de engajamento sejam limpas sem amputar frases narrativas reais
+    # Fallback volta ao título em caixa baixa no modelo inicial minimalista
+    fb_dec = director.direct_cut(cl, [WordTimestamp("bora", 1.0, 1.5)], 40.0, 20.0)
+    assert fb_dec.caption_text == "kscerato"
+
+    # Garante limpeza de perguntas forçadas no modelo minimalista
     dec = director.enforce_constraints(
         {
             "main_start": 0.0,
@@ -819,7 +823,7 @@ def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):
             "cold_open_enabled": False,
             "teaser_start": 0.0,
             "teaser_end": 0.0,
-            "caption_text": "Davy Jones tenta dar uma de encanador no meio do serviço e acaba alagando tudo! O que vocês acharam?",
+            "caption_text": "ele reclamando dos 30 fps no meio da partida kkkkk! O que vocês acharam?",
             "hashtags": ["#davyjones", "#cs2", "#fy", "#viral"],
             "virality_score": 90,
         },
@@ -828,7 +832,7 @@ def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):
         peak_hint_sec=15.0,
     )
     assert "O que vocês acharam" not in dec.caption_text
-    assert "alagando tudo!" in dec.caption_text
+    assert "reclamando dos 30 fps" in dec.caption_text
 
 
 def test_drip_timer_override_and_discord_select_menu(tmp_path: Path):

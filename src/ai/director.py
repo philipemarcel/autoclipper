@@ -158,14 +158,8 @@ class GeminiDirector:
         live_trends = fetch_brazil_realtime_trends(limit=15)
         trends_hint = ", ".join(live_trends) if live_trends else "(indisponível no momento)"
         web_bench = fetch_web_clip_benchmarks(creator_name, cluster.game_name or "", limit=6)
-        ref_titles = web_bench.get("titles") or []
         ref_tags = web_bench.get("hashtags") or []
         search_terms = web_bench.get("search_terms") or []
-        ref_titles_block = (
-            "\n".join(f"  * {t}" for t in ref_titles)
-            if ref_titles
-            else "  * (sem amostra externa — use estilo viral direto de cortes BR de TikTok/Reels)"
-        )
         web_tags_pool = ref_tags + [t for t in GAMING_CLIP_BENCHMARK_TAGS if t not in ref_tags]
         web_tags_hint = " ".join(web_tags_pool[:10])
         search_hint = ", ".join(search_terms[:6]) if search_terms else "(nenhum)"
@@ -193,8 +187,6 @@ DADOS DO MOMENTO ({platform_label}):
 - Títulos/temas deste momento: {json.dumps(clip_titles, ensure_ascii=False)}
 - Assuntos EM ALTA AGORA NO BRASIL (Google Trends tempo real): {trends_hint}
 - Buscas reais em alta para esse criador/jogo na Web: {search_hint}
-- REFERÊNCIAS REAIS DE LEGENDAS DE CLIPS DE JOGOS NA WEB (TikTok/Reels/Shorts):
-{ref_titles_block}
 - HASHTAGS MAIS USADAS EM CLIPS DE JOGOS VIRAIS NA WEB (TikTok/Reels): {web_tags_hint}
 - Duração total do vídeo bruto extraído: {raw_duration_sec:.2f}s
 - Ponto principal aproximado: {peak_line}
@@ -216,23 +208,15 @@ REGRAS OBRIGATÓRIAS DE EDIÇÃO:
    - Máximo 4 a 5 palavras curtas que aparecem na tela nos 2-3s iniciais.
    - Baseie-se LITERALMENTE no título/assunto do momento (`{cluster.dominant_title}`) ou na frase mais engraçada dita na transcrição.
    - PROIBIDO usar clichês genéricos de IA como "JOGADA DE OURO", "MOMENTO ÉPICO", "IMPERDÍVEL", "INACREDITÁVEL".
-4. LEGENDA E HASHTAGS COMPARADAS COM CLIPS VIRAIS DE JOGOS NA WEB (`caption_text` e `hashtags`):
-   - Antes de escrever, COMPARE o ritmo, o tamanho e o poder de retenção da sua `caption_text` com as "REFERÊNCIAS REAIS DE LEGENDAS DE CLIPS DE JOGOS NA WEB" acima (páginas reais do TikTok e Reels gamer BR).
-   - `caption_text`: **1 única frase curta e magnética (`35` a `80` caracteres no máximo)** — direta, coloquial brasileira, descrevendo **o fato curioso/absurdo da cena** com **um gancho que prenda até o fim**, no mesmo estilo real dos clips que viralizam no TikTok/Reels gamer.
-   - ESTRITAMENTE PROIBIDO:
-     * Tom de redação/jornalista longo (`"tenta X, mas acaba atrapalhando tudo"`, `"e a situação sai do controle"`, `"será que cumpre?"`, `"a situação vira risada total"`).
-     * Textão > `85` caracteres (precisa aparecer inteira na tela antes do *"Ver mais"*).
-     * Fala aleatória sem contexto (`"não conhece nada, galera"`, `"vai ser muito foda"`).
-   - Compare o nível de impacto real (varie conforme a cena):
-     * `"alanzoka caiu no pior bait possível no meio da fuga 💀"`
-     * `"o cara meteu um taser no davy jones bem na hora do roubo 😂"`
-     * `"bistecone apostou o PS5 ao vivo com o chat e olha nisso 👀"`
+4. COPY DE PÁGINA DE CORTES BR (`caption_text` e `hashtags`):
+   - `caption_text`: 1 única linha curta em caixa baixa, exatamente como páginas reais brasileiras de cortes escrevem no TikTok/Reels.
+   - Use o próprio título/assunto do momento (`{cluster.dominant_title}`) do criador `{creator_name}` adaptado de forma natural OU cite a reação/fala literal do criador no vídeo (ex: "ele reclamando dos 30 fps no primeiro minuto de jogo kkkkk", "o primeiro roubo em vice city já deu tudo errado 💀").
+   - PROIBIDO usar frases artificiais de IA como "galera surtando", "segura essa", "deixou todo mundo de cara", "o que acharam?".
    - `hashtags`: compare diretamente com "HASHTAGS MAIS USADAS EM CLIPS DE JOGOS VIRAIS NA WEB" e "Buscas reais em alta" acima, escolhendo de 4 a {self.profile.copy.max_hashtags} hashtags combinando:
      1) criador (`#{creator_handle}`),
      2) jogo/assunto em alta na web agora (ex: `#gta6`, `#gtarp`, `#cs2`, ou termo buscado acima se bater com a cena),
      3) nicho real de clips de games BR no TikTok/Reels (`#cortesdegames`, `#gamerbrasil`, `#humorgamer`, `#tiktokgames`),
      4) descoberta (`#fyp`, `#fy`, `#viral`).
-   - DESCRIÇÃO COMPACTA, DESCRITIVA E COM GANCHO garantida em poucas palavras!
 5. CORREÇÃO DE GRAFIA DO WHISPER (`word_corrections`):
    - Se notar na transcrição alguma palavra claramente ouvida errado pelo Whisper (ex: nome de jogo, gíria ou palavra trocada), inclua no dicionário `"word_corrections": {{"palavra_errada": "palavra_certa"}}` (caso contrário, `{{}}`).
 
@@ -391,7 +375,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             else:
                 main_end = main_start + allowed_main
 
-        # Limpeza da descrição compacta (remove enchimento genérico de IA e mantém <= 115 chars)
+        # Limpeza da copy minimalista (remove chamadas robóticas e interrogações forçadas)
         caption = str(raw.get("caption_text") or cluster_fallback_caption(self.profile)).strip()
         caption = re.sub(r"\s+", " ", caption)
         caption = re.sub(
@@ -400,10 +384,10 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             caption,
             flags=re.IGNORECASE,
         ).strip()
-        if len(caption) > 115:
-            # Tenta manter até a primeira oração completa antes de alongar
-            cut_pos = caption.rfind(" ", 0, 112)
-            caption = caption[: (cut_pos if cut_pos > 45 else 112)].rstrip(" ,;:") + "..."
+        if "?" in caption and len(caption.split("?")) > 1:
+            first_part = caption.split("?")[0].strip()
+            if len(first_part) > 8 and not first_part.lower().startswith(("quem", "como", "por que", "qual")):
+                caption = first_part
 
         raw_tags = [str(t).strip() for t in (raw.get("hashtags") or []) if str(t).strip()]
         if not raw_tags:
@@ -461,10 +445,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             cold_open = False
             t_start, t_end = 0.0, 0.0
 
-        title_clean = (cluster.dominant_title or "momento inesperado durante a live").strip()
-        creator_label = cluster.best_clip.broadcaster_name or self.profile.display_name
-        game_hint = f" em {cluster.game_name}" if cluster.game_name and cluster.game_name.lower() not in {"live", "youtube", "kick"} else ""
-        fallback_desc = f"{creator_label} protagonizou uma cena inesperada{game_hint}: {title_clean}."
+        title_clean = (cluster.dominant_title or "simplesmente intancável esse momento").strip()
         transcript_hint = " ".join(w.word for w in words[:40])
         tags = suggest_dynamic_hashtags(
             creator_handle=cluster.broadcaster_login or self.profile.twitch_login,
@@ -484,7 +465,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
                 "teaser_start": t_start,
                 "teaser_end": t_end,
                 "teaser_headline": title_clean.upper()[:42] if cold_open else "",
-                "caption_text": fallback_desc,
+                "caption_text": title_clean.lower(),
                 "hashtags": tags[: self.profile.copy.max_hashtags],
                 "virality_score": int(min(95, max(60, cluster.score))),
                 "reasoning": "Fallback centrado no pico de clipes da comunidade.",
