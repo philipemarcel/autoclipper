@@ -216,19 +216,13 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
                 if clean_token in norm_map:
                     w.word = norm_map[clean_token]
 
-        # Se o vídeo de origem já é um clipe nativo da Twitch (<= 55s), o espectador humano JÁ enquadrou
-        # o contexto (início da situação + reação final). Nunca deixamos a IA amputar o início ou o fim da história!
-        if raw_duration_sec <= 55.0:
-            first_word_start = words[0].start if words else 0.0
-            last_word_end = words[-1].end if words else raw_duration_sec
-            # Só permite cortar silêncio inicial antes da 1ª fala (máximo 2.5s) e silêncio final (máximo 1.5s)
-            max_allowed_start = min(2.5, max(0.0, first_word_start - 0.15))
-            min_allowed_end = max(raw_duration_sec - 1.5, min(raw_duration_sec, last_word_end + 0.25))
-            main_start = min(main_start, max_allowed_start)
-            main_end = max(main_end, min_allowed_end)
-
-        # Alinha às bordas das palavras para não decepar sílabas
-        if words and raw_duration_sec > 55.0:
+        # Quando o vídeo de origem é um clipe de referência da Twitch (ou janela curta <= 65s),
+        # preservamos 100% do início (0.0s) ao fim (raw_duration_sec) SEM cortar nenhum segundo das pontas!
+        # Isso garante que todo o contexto visual inicial e a risada/reação final do clipe fiquem intactos.
+        if raw_duration_sec <= max(65.0, edt.max_duration_seconds):
+            main_start = 0.0
+            main_end = raw_duration_sec
+        elif words:
             near_start = [w for w in words if abs(w.start - main_start) <= 0.6]
             if near_start:
                 w0 = min(near_start, key=lambda w: abs(w.start - main_start))

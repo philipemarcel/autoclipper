@@ -11,10 +11,10 @@ profiles:
     twitch_login: "alanzoka"
     display_name: "Alanzoka"
     language: "pt"
-    # Opcional: canais/abas do YouTube para vigiar automaticamente 24/7 (além dos links enviados via /cortar no Discord)
+    # Canais do YouTube monitorados 24/7 (vídeos novos + lives + repescagem de lives encerradas)
     youtube_channels:
-      - "https://www.youtube.com/@alanzoka/videos"
-      - "https://www.youtube.com/@alanzoka/streams"
+      - "https://www.youtube.com/@Gameplayrj"
+      - "https://www.youtube.com/@PaulinhoLOKOoficial"
 
     detection:
       # Agrupa múltiplos clipes criados pela comunidade na mesma janela temporal (segundos)
@@ -34,11 +34,11 @@ profiles:
       vod_padding_after_seconds: 45
 
     editing:
-      # Travado em <= 58s (incluindo o Cold Open) para evitar mute automático de música acima de 60s no TikTok
-      max_duration_seconds: 58.0
+      # Permite até 65s para preservar 100% dos clipes de até 60s da Twitch sem cortar início nem fim
+      max_duration_seconds: 65.0
       min_duration_seconds: 16.0
-      # Cold Open (Teaser): 2-3s do clímax logo no segundo 00:00 antes da cena completa
-      cold_open_enabled: true
+      # Mantém o clipe original de referência 100% íntegro do segundo 0.0 até o final (sem amputar pontas)
+      cold_open_enabled: false
       cold_open_min_main_duration: 22.0
       cold_open_min_seconds: 2.0
       cold_open_max_seconds: 3.2

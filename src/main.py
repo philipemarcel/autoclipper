@@ -109,11 +109,12 @@ def process_single_cluster(
         copy_path = cut_work_dir / "copy.txt"
         copy_path.write_text(decision.full_social_copy, encoding="utf-8")
 
+        creator_slug = cluster.broadcaster_login or profile.twitch_login
         date_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         stream_folder = f"{date_prefix}_{cluster.stream_or_vod_key}"
         anchor_label = f"vod{cluster.peak_offset}s" if cluster.peak_offset is not None else "clip"
         cut_folder_name = f"score{int(cluster.score)}_{anchor_label}_{cluster.cluster_id}"
-        drive_parts = ["cortes", profile.twitch_login, stream_folder, cut_folder_name]
+        drive_parts = ["cortes", creator_slug, stream_folder, cut_folder_name]
 
         folder_id, folder_url = store.ensure_folder_path(drive_parts)
         master_id, master_url = store.upload_file(rendered.master_mp4, drive_parts, "master_1080p60.mp4")
@@ -125,7 +126,7 @@ def process_single_cluster(
         record = CutRecord(
             cut_id=cluster.cluster_id,
             profile_id=profile.id,
-            twitch_login=profile.twitch_login,
+            twitch_login=creator_slug,
             stream_key=cluster.stream_or_vod_key,
             mode=cluster.mode,
             score=cluster.score,

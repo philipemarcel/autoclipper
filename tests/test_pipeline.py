@@ -80,9 +80,9 @@ def test_youtube_heatmap_and_time_range_parser():
     ]
     peaks = YouTubeMomentAnalyzer._extract_heatmap_peaks(heatmap, 0, 1000, max_cuts=2, chapters=[])
     assert len(peaks) >= 2
-    # O pico #1 deve ser o de value=0.95 (~305s -> janela começando em 285s)
-    assert peaks[0][0] == 285
-    assert peaks[1][0] == 585
+    # O pico #1 deve ser o de value=0.95 (~305s -> janela começando em 281s com 60s de contexto)
+    assert peaks[0][0] == 281
+    assert peaks[1][0] == 581
 
 
 def test_moment_clustering_and_deduplication():

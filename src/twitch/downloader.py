@@ -79,17 +79,22 @@ class TwitchDownloader:
 
     @staticmethod
     def _select_best_context_clip(cluster: MomentCluster):
+        """
+        Usa os clipes da página da Twitch como referência, priorizando dentro do cluster
+        o clipe popular que tenha MAIOR tempo de contexto (ex: 40s-60s em vez de um corte seco de 25s).
+        """
         best = cluster.best_clip
-        if best.duration >= 25.0:
+        if best.duration >= 42.0:
             return best
-        # Se o clipe #1 for curto (<25s), verifica se há outro clipe no mesmo cluster com >=28s e boas views
+        # Procura no mesmo momento se algum espectador fez um clipe mais longo (com mais contexto antes/depois)
         longer_candidates = [
             c
             for c in cluster.clips
-            if c.duration >= 27.0 and c.view_count >= max(5, int(best.view_count * 0.25))
+            if c.duration > best.duration + 6.0
+            and (c.view_count >= max(15, int(best.view_count * 0.25)) or c.view_count >= 150)
         ]
         if longer_candidates:
-            return max(longer_candidates, key=lambda c: (c.view_count, c.duration))
+            return max(longer_candidates, key=lambda c: (c.duration * 1.5) + (c.view_count * 0.5))
         return best
 
     def _download_from_vod(self, cluster: MomentCluster, work_dir: Path) -> DownloadedRawMedia:

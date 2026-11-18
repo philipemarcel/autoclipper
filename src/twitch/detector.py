@@ -157,6 +157,41 @@ class MomentDetector:
             )
             candidates.extend(filtered)
 
+        # ------------------------------------------------------------------
+        # MODO 3: PÁGINA DE CLIPES DO CANAL (Top Clipes 7 dias / 24h como referência direta)
+        # Pega clipes em destaque na página da Twitch mesmo quando vod_offset é null ou fora dos VODs acima
+        # ------------------------------------------------------------------
+        try:
+            top_page_clips = helix.get_clips_in_window(
+                broadcaster_id=broadcaster_id,
+                started_at_iso=_format_iso_utc(now - timedelta(days=7)),
+                ended_at_iso=_format_iso_utc(now),
+                max_pages=3,
+            )
+            if top_page_clips:
+                page_clusters = self.cluster_clips(
+                    clips=top_page_clips,
+                    stream_key="twitch_top_7d",
+                    mode="post_live",
+                    now_utc=now,
+                    game_name="",
+                    stream_title="Top Clipes da Página Twitch",
+                )
+                already_grabbed_ids = {c.id for cl in candidates for c in cl.clips}
+                page_clusters = [
+                    pc for pc in page_clusters if not ({c.id for c in pc.clips} & already_grabbed_ids)
+                ]
+                page_filtered = self._filter_and_deduplicate(
+                    clusters=page_clusters,
+                    processed_state=processed_state,
+                    stream_key="twitch_top_7d",
+                    alt_stream_key="",
+                    remaining_slots=self.cfg.max_cuts_per_run,
+                )
+                candidates.extend(page_filtered)
+        except Exception as exc:
+            logger.warning("Aviso ao consultar página de Top Clipes 7d da Twitch: %s", exc)
+
         # Prioriza momentos da live AO VIVO (`live_hot`) sobre repescagem de lives passadas (`post_live`)
         candidates.sort(key=lambda c: (1 if c.mode == "live_hot" else 0, c.score), reverse=True)
         return candidates[: self.cfg.max_cuts_per_run]

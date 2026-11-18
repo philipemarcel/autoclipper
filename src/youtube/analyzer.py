@@ -90,33 +90,43 @@ class YouTubeMomentAnalyzer:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=90)
         return json.loads(proc.stdout)
 
-    def discover_channel_recent_urls(self, channel_url: str, max_items: int = 1) -> List[str]:
-        """Lista os vídeos ou lives mais recentes de uma aba de canal do YouTube (`@canal/videos` ou `@canal/streams`)."""
-        cmd = [
-            sys.executable,
-            "-m",
-            "yt_dlp",
-            "--flat-playlist",
-            "--playlist-end",
-            str(max(1, max_items)),
-            "--dump-single-json",
-            channel_url.strip(),
-        ]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=45)
-            data = json.loads(proc.stdout)
-            urls: List[str] = []
-            for entry in data.get("entries") or []:
-                vid = entry.get("id")
-                e_url = entry.get("url") or (f"https://www.youtube.com/watch?v={vid}" if vid else "")
-                if e_url and "youtube.com" not in e_url and vid:
-                    e_url = f"https://www.youtube.com/watch?v={vid}"
-                if e_url:
-                    urls.append(e_url)
-            return urls
-        except Exception as exc:
-            logger.warning("Aviso ao listar vídeos recentes do canal YouTube %s: %s", channel_url, exc)
-            return []
+    def discover_channel_recent_urls(self, channel_url: str, max_items: int = 2) -> List[str]:
+        """
+        Dado um canal do YouTube (ex: `https://www.youtube.com/@Gameplayrj`), verifica automaticamente:
+          1. A aba `/streams` (Lives ao vivo + Repescagem das últimas lives encerradas!)
+          2. A aba `/videos` (Vídeos novos publicados no canal!)
+        """
+        base = channel_url.strip().rstrip("/")
+        if base.endswith(("/videos", "/streams", "/shorts")):
+            tabs = [base]
+        else:
+            tabs = [f"{base}/streams", f"{base}/videos"]
+
+        urls: List[str] = []
+        for tab_url in tabs:
+            cmd = [
+                sys.executable,
+                "-m",
+                "yt_dlp",
+                "--flat-playlist",
+                "--playlist-end",
+                str(max(1, max_items)),
+                "--dump-single-json",
+                tab_url,
+            ]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=45)
+                data = json.loads(proc.stdout)
+                for entry in data.get("entries") or []:
+                    vid = entry.get("id")
+                    e_url = entry.get("url") or (f"https://www.youtube.com/watch?v={vid}" if vid else "")
+                    if e_url and "youtube.com" not in e_url and vid:
+                        e_url = f"https://www.youtube.com/watch?v={vid}"
+                    if e_url and e_url not in urls:
+                        urls.append(e_url)
+            except Exception as exc:
+                logger.warning("Aviso ao listar aba YouTube %s: %s", tab_url, exc)
+        return urls
 
     def discover_moments(
         self,
@@ -312,10 +322,10 @@ class YouTubeMomentAnalyzer:
             if any(abs(mid - uc) < 65.0 for uc in used_centers):
                 continue
 
-            # Enquadra ~20s de preparação antes do pico e ~35s durante/após o pico (janela bruta de 55s)
-            w0 = max(min_sec, int(round(mid - 20)))
-            w1 = min(max_sec, w0 + 56)
-            if w1 - w0 < 16:
+            # Enquadra ~24s de contexto antes do pico e ~36s durante/após o pico (janela completa de 60s!)
+            w0 = max(min_sec, int(round(mid - 24)))
+            w1 = min(max_sec, w0 + 60)
+            if w1 - w0 < 20:
                 continue
 
             # Descobre nome do capítulo se houver
@@ -354,8 +364,8 @@ Você é um editor viral de páginas de cortes no TikTok.
 Analise a transcrição abaixo do vídeo do YouTube "{info.get('title', '')}" e escolha os {max_cuts} momentos MAIS ENGRAÇADOS, ABSURDOS ou DE MAIOR RETENÇÃO entre {min_sec}s e {max_sec}s.
 
 Regras:
-- Cada momento deve ter entre 32s e 56s (`end_sec - start_sec` entre 32 e 56).
-- Os momentos NÃO podem se sobrepor (distância mínima de 50s entre eles).
+- Cada momento deve ter entre 45s e 62s de contexto completo (`end_sec - start_sec` entre 45 e 62), começando na introdução do assunto e terminando só depois da reação final.
+- Os momentos NÃO podem se sobrepor (distância mínima de 55s entre eles).
 - `label`: frase curta de 3 a 6 palavras resumindo a piada/momento.
 
 TRANSCRIÇÃO:
@@ -481,10 +491,11 @@ Responda ESTRITAMENTE em JSON válido:
             vod_offset=start_sec,
         )
 
+        clean_uploader = re.sub(r"[^\w]", "", uploader).lower() or self.profile.twitch_login
         return MomentCluster(
             cluster_id=cluster_id,
             profile_id=self.profile.id,
-            broadcaster_login=self.profile.twitch_login,
+            broadcaster_login=clean_uploader,
             stream_or_vod_key=f"yt_{video_id}",
             mode=mode,
             clips=[pseudo_clip],
