@@ -11,6 +11,10 @@ profiles:
     twitch_login: "alanzoka"
     display_name: "Alanzoka"
     language: "pt"
+    # Opcional: canais/abas do YouTube para vigiar automaticamente 24/7 (além dos links enviados via /cortar no Discord)
+    youtube_channels:
+      - "https://www.youtube.com/@alanzoka/videos"
+      - "https://www.youtube.com/@alanzoka/streams"
 
     detection:
       # Agrupa múltiplos clipes criados pela comunidade na mesma janela temporal (segundos)

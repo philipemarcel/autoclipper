@@ -28,6 +28,8 @@ from src.twitch.downloader import TwitchDownloader
 from src.video.captions import CaptionGenerator
 from src.video.layout_analyzer import LayoutAnalyzer
 from src.video.renderer import VideoRenderer
+from src.youtube.analyzer import YouTubeMomentAnalyzer
+from src.youtube.downloader import YouTubeDownloader
 
 PROCESSED_STATE_FILE = "processed_moments.json"
 
@@ -54,9 +56,12 @@ def process_single_cluster(
     cut_work_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1. Download da janela do VOD público (com fallback automático para clipe pronto)
-        downloader = TwitchDownloader(profile.detection)
-        raw_media = downloader.download_moment(cluster, cut_work_dir)
+        # 1. Download da mídia bruta (YouTube Video/Live OU Twitch VOD/Clipe)
+        if cluster.mode.startswith("youtube"):
+            raw_media = YouTubeDownloader().download_moment(cluster, cut_work_dir)
+        else:
+            downloader = TwitchDownloader(profile.detection)
+            raw_media = downloader.download_moment(cluster, cut_work_dir)
 
         # 2. Transcrição word-level (Groq Whisper na nuvem / faster-whisper GPU no Colab Ultra)
         transcriber = WordTranscriber(language=profile.language)
@@ -215,10 +220,98 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
             except Exception as exc:
                 logger.exception("Erro ao processar cluster %s: %s", cluster.cluster_id, exc)
 
+        # Monitoramento automático 24/7 dos canais do YouTube configurados no perfil (vídeos novos e lives)
+        if prof.youtube_channels and total_created < prof.detection.max_cuts_per_run:
+            yt_analyzer = YouTubeMomentAnalyzer(prof)
+            for ch_url in prof.youtube_channels:
+                recent_urls = yt_analyzer.discover_channel_recent_urls(ch_url, max_items=1)
+                for v_url in recent_urls:
+                    if total_created >= prof.detection.max_cuts_per_run:
+                        break
+                    try:
+                        _, yt_clusters = yt_analyzer.discover_moments(
+                            url=v_url,
+                            max_cuts=min(2, prof.detection.max_cuts_per_run - total_created),
+                            work_dir=work_root / "yt_meta",
+                            processed_state=processed_state,
+                        )
+                        for ytc in yt_clusters:
+                            process_single_cluster(prof, ytc, store, theme, processed_state, work_root)
+                            total_created += 1
+                    except Exception as exc:
+                        logger.warning("Aviso ao monitorar vídeo YouTube %s: %s", v_url, exc)
+
     return total_created
 
 
-def cmd_discord_action(action: str, cut_id: str, discord_message_id: str = "") -> None:
+def cmd_youtube(
+    url: str,
+    max_cuts: int = 3,
+    time_range: str = "",
+    profile_filter: Optional[str] = None,
+) -> int:
+    """
+    Processa qualquer URL do YouTube (vídeo pronto, VOD ou Live em andamento) — ou link direto da Twitch —
+    enviado via comando `/cortar` no Discord ou via CLI.
+    """
+    profiles = load_profiles(only_enabled=True) or load_profiles(only_enabled=False)
+    if profile_filter:
+        matched = [p for p in profiles if p.id == profile_filter or p.twitch_login == profile_filter.lower()]
+        if matched:
+            profiles = matched
+    profile = profiles[0]
+
+    store = DriveStore()
+    theme = load_subtitle_theme()
+    processed_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
+    work_root = PROJECT_ROOT / "work_tmp" / "youtube"
+    notifier = DiscordNotifier(profile)
+
+    analyzer = YouTubeMomentAnalyzer(profile)
+    info, clusters = analyzer.discover_moments(
+        url=url.strip(),
+        max_cuts=max(1, min(10, int(max_cuts))),
+        work_dir=work_root / "meta",
+        time_range_str=time_range,
+        processed_state=processed_state,
+    )
+
+    if not clusters:
+        notifier.post_status_reply(
+            "",
+            f"⚠️ Não encontrei momentos novos para cortar em <{url}> (ou todos os picos já foram cortados).",
+        )
+        return 0
+
+    created = 0
+    for cluster in clusters:
+        try:
+            process_single_cluster(profile, cluster, store, theme, processed_state, work_root)
+            created += 1
+        except Exception as exc:
+            logger.exception("Erro ao gerar corte do YouTube (%s): %s", cluster.cluster_id, exc)
+            notifier.post_status_reply(
+                "",
+                f"❌ Erro ao processar trecho de `{info.get('title', url)}`: `{exc}`",
+            )
+
+    return created
+
+
+def cmd_discord_action(
+    action: str,
+    cut_id: str,
+    discord_message_id: str = "",
+    youtube_url: str = "",
+    max_cuts: int = 3,
+    time_range: str = "",
+) -> None:
+    if action == "youtube_cut":
+        if not youtube_url.strip():
+            raise ValueError("URL do YouTube obrigatória para a ação youtube_cut.")
+        cmd_youtube(url=youtube_url.strip(), max_cuts=max_cuts, time_range=time_range)
+        return
+
     store = DriveStore()
     profiles = {p.id: p for p in load_profiles(only_enabled=False)}
     processed_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
@@ -374,10 +467,19 @@ def build_cli() -> argparse.ArgumentParser:
     p_watch.add_argument("--profile", type=str, default=None, help="Filtrar por ID ou login do perfil.")
     p_watch.add_argument("--max-cuts", type=int, default=None, help="Sobrescrever limite de cortes nesta rodada.")
 
-    p_act = sub.add_parser("discord-action", help="Processa botão clicado no Discord.")
+    p_act = sub.add_parser("discord-action", help="Processa botão ou comando /cortar do Discord.")
     p_act.add_argument("--action", type=str, required=True)
-    p_act.add_argument("--cut-id", type=str, required=True)
+    p_act.add_argument("--cut-id", type=str, default="")
     p_act.add_argument("--message-id", type=str, default="")
+    p_act.add_argument("--url", type=str, default="")
+    p_act.add_argument("--max-cuts", type=int, default=3)
+    p_act.add_argument("--time-range", type=str, default="")
+
+    p_yt = sub.add_parser("youtube", help="Gera cortes automáticos de um vídeo ou live do YouTube.")
+    p_yt.add_argument("--url", type=str, required=True, help="Link do vídeo ou live do YouTube.")
+    p_yt.add_argument("--max-cuts", type=int, default=3, help="Quantidade de cortes (1 a 10).")
+    p_yt.add_argument("--range", type=str, default="", help="Trecho opcional (ex: 12:30-15:00 ou 25:00).")
+    p_yt.add_argument("--profile", type=str, default=None)
 
     sub.add_parser("drip-publish", help="Publica cortes vencidos na Fila Espaçada Inteligente.")
 
@@ -396,8 +498,22 @@ def main() -> None:
 
     if args.command == "watch":
         cmd_watch(profile_filter=args.profile, max_cuts_override=args.max_cuts)
+    elif args.command == "youtube":
+        cmd_youtube(
+            url=args.url,
+            max_cuts=args.max_cuts,
+            time_range=args.range,
+            profile_filter=args.profile,
+        )
     elif args.command == "discord-action":
-        cmd_discord_action(action=args.action, cut_id=args.cut_id, discord_message_id=args.message_id)
+        cmd_discord_action(
+            action=args.action,
+            cut_id=args.cut_id,
+            discord_message_id=args.message_id,
+            youtube_url=args.url,
+            max_cuts=args.max_cuts,
+            time_range=args.time_range,
+        )
     elif args.command == "drip-publish":
         cmd_drip_publish()
     elif args.command == "colab-loop":

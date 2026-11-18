@@ -146,7 +146,58 @@ export default {
       return Response.json({ type: 1 });
     }
 
-    // 2. Clique em botão interativo (`MESSAGE_COMPONENT`)
+    // 2. Comando Slash `/cortar` enviado no chat do Discord (`APPLICATION_COMMAND`)
+    if (interaction.type === 2 && interaction.data?.name === "cortar") {
+      const opts = {};
+      for (const opt of interaction.data.options || []) {
+        opts[opt.name] = opt.value;
+      }
+      const ytUrl = String(opts.url || "").trim();
+      const maxCuts = String(opts.quantidade || 3);
+      const timeRange = String(opts.trecho || "").trim();
+      const username = interaction.member?.user?.username || interaction.user?.username || "admin";
+
+      ctx.waitUntil(
+        fetch(
+          `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/discord_action.yml/dispatches`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${env.GITHUB_PAT}`,
+              Accept: "application/vnd.github+json",
+              "User-Agent": "TwitchAutoClipper-DiscordWorker",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              ref: env.GITHUB_BRANCH || "main",
+              inputs: {
+                action: "youtube_cut",
+                cut_id: "youtube",
+                youtube_url: ytUrl,
+                max_cuts: maxCuts,
+                time_range: timeRange,
+                actor: username,
+              },
+            }),
+          }
+        )
+      );
+
+      const rangeLabel = timeRange ? `Trecho \`${timeRange}\`` : "Automático (Picos Mais Assistidos / IA)";
+      return Response.json({
+        type: 4,
+        data: {
+          content:
+            `🎬 **Pedido de cortes recebido por \`${username}\`!**\n` +
+            `• **Vídeo/Live:** <${ytUrl}>\n` +
+            `• **Quantidade:** até \`${maxCuts}\` corte(s) \`9:16\`\n` +
+            `• **Seleção:** ${rangeLabel}\n` +
+            `⏳ *Analisando, legendando e renderizando na nuvem... Os cortes prontos chegarão aqui em ~1–3 minutos!*`,
+        },
+      });
+    }
+
+    // 3. Clique em botão interativo (`MESSAGE_COMPONENT`)
     if (interaction.type === 3 && interaction.data?.custom_id) {
       const [action, cutId] = interaction.data.custom_id.split(":");
       const username = interaction.member?.user?.username || interaction.user?.username || "admin";

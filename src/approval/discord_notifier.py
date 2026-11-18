@@ -45,7 +45,14 @@ class DiscordNotifier:
         url = f"{DISCORD_API_BASE}/channels/{self.channel_id}/messages"
         headers = {"Authorization": f"Bot {self.bot_token}"}
 
-        mode_badge = "🔥 AO VIVO" if cut.mode == "live_hot" else "🏁 REPESCAGEM PÓS-LIVE"
+        if cut.mode == "youtube_live":
+            mode_badge = "🔴 YOUTUBE LIVE"
+        elif cut.mode.startswith("youtube"):
+            mode_badge = "▶️ YOUTUBE"
+        elif cut.mode == "live_hot":
+            mode_badge = "🔥 AO VIVO"
+        else:
+            mode_badge = "🏁 REPESCAGEM PÓS-LIVE"
         audio_badge = "🔇 Voz Isolada (Sem Música)" if cut.audio_cleaned else "🎵 Áudio Original"
         drip_min = self.profile.publishing.drip_interval_minutes
 

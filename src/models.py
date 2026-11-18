@@ -73,6 +73,7 @@ class ProfileConfig:
     display_name: str = ""
     enabled: bool = True
     language: str = "pt"
+    youtube_channels: List[str] = field(default_factory=list)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     editing: EditingConfig = field(default_factory=EditingConfig)
     copy: CopyConfig = field(default_factory=CopyConfig)

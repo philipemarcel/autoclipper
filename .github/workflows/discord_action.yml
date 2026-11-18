@@ -1,20 +1,33 @@
-name: "3. Discord 1-Click Button Handler"
+name: "3. Discord 1-Click Button & /cortar Handler"
 
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: "Ação clicada no Discord (approve_both, now_both, approve_reels, approve_tiktok, clean_audio, reject)"
+        description: "Ação (approve_both, now_both, approve_reels, approve_tiktok, now_tiktok, clean_audio, reject, youtube_cut)"
         required: true
       cut_id:
         description: "ID único do corte"
-        required: true
+        required: false
+        default: ""
       discord_message_id:
         description: "ID da mensagem no Discord"
         required: false
         default: ""
+      youtube_url:
+        description: "URL do vídeo ou live do YouTube (para /cortar)"
+        required: false
+        default: ""
+      max_cuts:
+        description: "Quantidade de cortes do YouTube (1 a 10)"
+        required: false
+        default: "3"
+      time_range:
+        description: "Trecho opcional (ex: 12:30-15:00)"
+        required: false
+        default: ""
       actor:
-        description: "Usuário que clicou no botão"
+        description: "Usuário que disparou no Discord"
         required: false
         default: ""
 
@@ -25,7 +38,7 @@ concurrency:
 jobs:
   handle-button:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
       - name: Checkout repository
@@ -37,10 +50,11 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install FFmpeg
+      - name: Install FFmpeg & Fonts
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg fonts-liberation fonts-dejavu-core fontconfig
+          fc-cache -fv
 
       - name: Install Python dependencies (+ Demucs only when cleaning music)
         run: |
@@ -51,8 +65,13 @@ jobs:
             pip install demucs
           fi
 
-      - name: Execute Discord Button Action
+      - name: Execute Discord Button or /cortar Command
         env:
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GDRIVE_TOKEN_JSON: ${{ secrets.GDRIVE_TOKEN_JSON }}
           GDRIVE_ROOT_FOLDER_NAME: ${{ vars.GDRIVE_ROOT_FOLDER_NAME || 'TwitchAutoClipper' }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
@@ -67,4 +86,7 @@ jobs:
           python -m src.main discord-action \
             --action "${{ inputs.action }}" \
             --cut-id "${{ inputs.cut_id }}" \
-            --message-id "${{ inputs.discord_message_id }}"
+            --message-id "${{ inputs.discord_message_id }}" \
+            --url "${{ inputs.youtube_url }}" \
+            --max-cuts "${{ inputs.max_cuts || '3' }}" \
+            --time-range "${{ inputs.time_range }}"

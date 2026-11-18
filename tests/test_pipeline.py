@@ -27,6 +27,7 @@ from src.twitch.detector import MomentDetector
 from src.video.captions import CaptionGenerator, hex_to_ass_color
 from src.video.layout_analyzer import CropRect, LayoutAnalyzer, LayoutSpec
 from src.video.renderer import VideoRenderer
+from src.youtube.analyzer import YouTubeMomentAnalyzer, parse_time_range
 
 
 def _make_profile() -> ProfileConfig:
@@ -65,6 +66,23 @@ def test_parse_twitch_duration():
     assert parse_twitch_duration_seconds("45m10s") == 45 * 60 + 10
     assert parse_twitch_duration_seconds("58s") == 58
     assert parse_twitch_duration_seconds("") == 0
+
+
+def test_youtube_heatmap_and_time_range_parser():
+    assert parse_time_range("12:30-14:00") == (750, 840)
+    assert parse_time_range("10:00") == (585, 650)
+
+    heatmap = [
+        {"start_time": 100.0, "end_time": 110.0, "value": 0.30},
+        {"start_time": 300.0, "end_time": 310.0, "value": 0.95},
+        {"start_time": 312.0, "end_time": 320.0, "value": 0.85},  # perto de 305 -> deduplicado (<65s)
+        {"start_time": 600.0, "end_time": 610.0, "value": 0.80},
+    ]
+    peaks = YouTubeMomentAnalyzer._extract_heatmap_peaks(heatmap, 0, 1000, max_cuts=2, chapters=[])
+    assert len(peaks) >= 2
+    # O pico #1 deve ser o de value=0.95 (~305s -> janela começando em 285s)
+    assert peaks[0][0] == 285
+    assert peaks[1][0] == 585
 
 
 def test_moment_clustering_and_deduplication():
