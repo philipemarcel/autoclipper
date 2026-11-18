@@ -232,6 +232,20 @@ export default {
       const username = interaction.member?.user?.username || interaction.user?.username || "admin";
       const messageId = interaction.message?.id || "";
 
+      if (action === "copy_caption") {
+        const fields = interaction.message?.embeds?.[0]?.fields || [];
+        const copyField = fields.find((f) => String(f.name || "").includes("Copy")) || fields[0];
+        let rawText = String(copyField?.value || "").trim();
+        rawText = rawText.replace(/^```[\w]*\n?/, "").replace(/\n?```$/, "").trim();
+        return Response.json({
+          type: 4,
+          data: {
+            content: rawText || "Descrição indisponível neste card.",
+            flags: 64,
+          },
+        });
+      }
+
       // Dispara o GitHub Actions em background usando `ctx.waitUntil` (responde ao Discord em <100ms)
       ctx.waitUntil(
         fetch(

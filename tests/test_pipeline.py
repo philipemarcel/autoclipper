@@ -12,15 +12,18 @@ from src.ai.director import GeminiDirector
 from src.config_loader import load_profiles, load_subtitle_theme
 from src.ffmpeg_utils import get_ffmpeg_bin
 from src.models import (
+    CutRecord,
     DetectionConfig,
     DirectorDecision,
     EditingConfig,
     MomentCluster,
     ProfileConfig,
+    TikTokPublishConfig,
     TwitchClip,
     WordTimestamp,
 )
 from src.publisher.drip_scheduler import DripScheduler
+from src.publisher.tiktok_poster import TikTokPublisher
 from src.storage.gdrive import DriveStore
 from src.twitch.client import parse_twitch_duration_seconds
 from src.twitch.detector import MomentDetector
@@ -325,3 +328,191 @@ def test_end_to_end_ffmpeg_render_and_drive_store(tmp_path: Path):
         out_dir=tmp_path / "out_split",
     )
     assert rendered_split.master_mp4.exists() and rendered_split.master_mp4.stat().st_size > 10_000
+
+
+def test_drive_retention_cleanup_10_days_and_public_download_url(tmp_path: Path):
+    store = DriveStore(mount_path=str(tmp_path / "drive_cleanup"))
+    now = datetime(2026, 11, 18, 18, 0, 0, tzinfo=timezone.utc)
+
+    old_mp4 = tmp_path / "old_src.mp4"
+    old_mp4.write_bytes(b"old-video-bytes")
+    new_mp4 = tmp_path / "new_src.mp4"
+    new_mp4.write_bytes(b"new-video-bytes")
+    queued_mp4 = tmp_path / "queued_src.mp4"
+    queued_mp4.write_bytes(b"queued-video-bytes")
+
+    old_folder_id, _ = store.ensure_folder_path(["cortes", "alanzoka", "old_cut"])
+    old_master_id, _ = store.upload_file(old_mp4, ["cortes", "alanzoka", "old_cut"], "master_1080p60.mp4")
+
+    new_folder_id, _ = store.ensure_folder_path(["cortes", "alanzoka", "new_cut"])
+    new_master_id, _ = store.upload_file(new_mp4, ["cortes", "alanzoka", "new_cut"], "master_1080p60.mp4")
+
+    queued_folder_id, _ = store.ensure_folder_path(["cortes", "alanzoka", "queued_cut"])
+    store.upload_file(queued_mp4, ["cortes", "alanzoka", "queued_cut"], "master_1080p60.mp4")
+
+    dl_uri = store.ensure_public_download_url(new_master_id)
+    assert dl_uri.startswith("file://")
+
+    state = {
+        "cuts": [
+            {
+                "cut_id": "cut_old_11d",
+                "profile_id": "criador_01",
+                "stream_key": "vod_1",
+                "video_id": "vod_1",
+                "vod_anchor_sec": 120,
+                "clip_ids": ["clip_old"],
+                "created_at": (now - timedelta(days=11)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "drive_folder_id": old_folder_id,
+                "drive_folder_url": "https://drive.google.com/drive/folders/old",
+                "master_file_id": old_master_id,
+                "master_file_url": "https://drive.google.com/file/d/old/view",
+                "download_url": "https://drive.google.com/uc?export=download&id=old&confirm=t",
+                "clean_file_id": "",
+                "srt_file_id": "",
+                "status": "published",
+            },
+            {
+                "cut_id": "cut_recent_3d",
+                "profile_id": "criador_01",
+                "stream_key": "vod_2",
+                "video_id": "vod_2",
+                "vod_anchor_sec": 300,
+                "clip_ids": ["clip_new"],
+                "created_at": (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "drive_folder_id": new_folder_id,
+                "master_file_id": new_master_id,
+                "status": "pending_approval",
+            },
+            {
+                "cut_id": "cut_old_but_queued",
+                "profile_id": "criador_01",
+                "stream_key": "vod_3",
+                "video_id": "vod_3",
+                "vod_anchor_sec": 500,
+                "created_at": (now - timedelta(days=15)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "drive_folder_id": queued_folder_id,
+                "status": "queued",
+            },
+        ]
+    }
+
+    report = store.cleanup_expired_cuts(
+        state,
+        retention_days=10,
+        now_utc=now,
+        active_queue_cut_ids={"cut_old_but_queued"},
+    )
+    assert report["changed"] is True
+    assert report["deleted"] == 1
+    assert report["deleted_cut_ids"] == ["cut_old_11d"]
+
+    # Pasta antiga removida do Drive, mas metadados de deduplicação preservados
+    assert not Path(old_folder_id).exists()
+    assert state["cuts"][0]["drive_deleted"] is True
+    assert state["cuts"][0]["vod_anchor_sec"] == 120
+    assert state["cuts"][0]["clip_ids"] == ["clip_old"]
+    assert state["cuts"][0]["download_url"] == ""
+
+    # Corte recente (<10d) e corte protegido na fila continuam intactos
+    assert Path(new_folder_id).exists()
+    assert Path(queued_folder_id).exists()
+
+
+def test_tiktok_direct_self_only_and_unaudited_inbox_fallback(tmp_path: Path, monkeypatch):
+    video = tmp_path / "cut.mp4"
+    video.write_bytes(b"0" * 1024)
+
+    class FakeResp:
+        def __init__(self, status_code: int, body: dict):
+            self.status_code = status_code
+            self._body = body
+            self.ok = 200 <= status_code < 300
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise RuntimeError(f"HTTP {self.status_code}: {self._body}")
+
+    # Cenário 1: Direct Post pré-aprovação enviando SELF_ONLY com legenda/caption (conta privada)
+    calls = []
+
+    def fake_post_direct(url, headers=None, json=None, data=None, timeout=30):
+        calls.append((url, json))
+        if url.endswith("/post/publish/video/init/"):
+            return FakeResp(200, {"data": {"publish_id": "pub_direct_1", "upload_url": "https://upload.tiktok/1"}})
+        return FakeResp(404, {})
+
+    def fake_put(url, headers=None, data=None, timeout=240):
+        return FakeResp(200, {})
+
+    monkeypatch.setattr("src.publisher.tiktok_poster.requests.post", fake_post_direct)
+    monkeypatch.setattr("src.publisher.tiktok_poster.requests.put", fake_put)
+
+    prof = _make_profile()
+    prof.publishing.tiktok = TikTokPublishConfig(
+        enabled=True,
+        mode="direct",
+        privacy_level="SELF_ONLY",
+        fallback_to_inbox=True,
+    )
+    pub = TikTokPublisher(prof, access_token="tok_123")
+    pid = pub.publish_video(video, "minha descrição braba\n\n#cortes #live")
+    assert pid == "pub_direct_1"
+    assert pub.last_publish_mode == "direct:SELF_ONLY"
+    assert calls[0][1]["post_info"]["privacy_level"] == "SELF_ONLY"
+    assert "minha descrição braba" in calls[0][1]["post_info"]["title"]
+
+    # Cenário 2: Conta pública pré-aprovação retorna 403 unaudited_client -> fallback automático para inbox
+    calls_fb = []
+
+    def fake_post_fallback(url, headers=None, json=None, data=None, timeout=30):
+        calls_fb.append(url)
+        if url.endswith("/post/publish/video/init/"):
+            return FakeResp(403, {"error": {"code": "unaudited_client_can_only_post_to_private_accounts"}})
+        if url.endswith("/post/publish/inbox/video/init/"):
+            return FakeResp(200, {"data": {"publish_id": "pub_inbox_2", "upload_url": "https://upload.tiktok/2"}})
+        return FakeResp(404, {})
+
+    monkeypatch.setattr("src.publisher.tiktok_poster.requests.post", fake_post_fallback)
+    pub_fb = TikTokPublisher(prof, access_token="tok_123")
+    pid_fb = pub_fb.publish_video(video, "caption test")
+    assert pid_fb == "pub_inbox_2"
+    assert pub_fb.last_publish_mode == "inbox_fallback"
+    assert any(u.endswith("/post/publish/inbox/video/init/") for u in calls_fb)
+
+
+def test_discord_notifier_embed_has_independent_download_and_copy_button():
+    from src.approval.discord_notifier import DiscordNotifier
+
+    cut = CutRecord(
+        cut_id="c_dl_1",
+        profile_id="criador_01",
+        twitch_login="alanzoka",
+        stream_key="v1",
+        mode="live_hot",
+        score=95.0,
+        source_type="vod",
+        video_id="v1",
+        vod_anchor_sec=100,
+        clip_urls=[],
+        caption="que susto KKKKK\n\n#cortes #live",
+        teaser_headline="",
+        total_duration=42.0,
+        layout_used="split_screen",
+        drive_folder_id="fld1",
+        drive_folder_url="https://drive.google.com/drive/folders/fld1",
+        master_file_id="mst1",
+        master_file_url="https://drive.google.com/file/d/mst1/view",
+        clean_file_id="cln1",
+        srt_file_id="srt1",
+        created_at="2026-11-18T17:00:00Z",
+        download_url="https://drive.google.com/uc?export=download&id=mst1&confirm=t",
+    )
+    assert "export=download" in cut.download_url
+    rows = DiscordNotifier._build_action_rows("c_dl_1", drip_min=75, audio_cleaned=False, ig_enabled=False, tt_enabled=True)
+    custom_ids = [btn["custom_id"] for r in rows for btn in r["components"]]
+    assert "copy_caption:c_dl_1" in custom_ids
+    assert "approve_tiktok:c_dl_1" in custom_ids

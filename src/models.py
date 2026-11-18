@@ -54,6 +54,8 @@ class InstagramPublishConfig:
 class TikTokPublishConfig:
     enabled: bool = True
     mode: str = "inbox"  # inbox | direct
+    privacy_level: str = "PUBLIC_TO_EVERYONE"  # SELF_ONLY | PUBLIC_TO_EVERYONE | MUTUAL_FOLLOW_FRIENDS | FOLLOWER_OF_CREATOR
+    fallback_to_inbox: bool = True
     access_token_env: str = "TIKTOK_ACCESS_TOKEN"
 
 
@@ -62,6 +64,7 @@ class PublishingConfig:
     drip_interval_minutes: int = 75
     quiet_hours_brt: Optional[List[int]] = field(default_factory=lambda: [3, 9])
     timezone: str = "America/Sao_Paulo"
+    drive_retention_days: int = 10
     instagram: InstagramPublishConfig = field(default_factory=InstagramPublishConfig)
     tiktok: TikTokPublishConfig = field(default_factory=TikTokPublishConfig)
 
@@ -191,6 +194,7 @@ class CutRecord:
     clean_file_id: str
     srt_file_id: str
     created_at: str
+    download_url: str = ""
     status: str = "pending_approval"  # pending_approval | queued | published | rejected
     audio_cleaned: bool = False
     discord_message_id: str = ""

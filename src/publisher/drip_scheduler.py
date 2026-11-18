@@ -232,6 +232,8 @@ class DripScheduler:
             tt = TikTokPublisher(profile)
             if tt.is_ready:
                 results["tiktok_publish_id"] = tt.publish_video(local_master, caption)
+                if tt.last_publish_mode:
+                    results["tiktok_mode"] = tt.last_publish_mode
             else:
                 results["tiktok"] = "skipped_unconfigured"
 

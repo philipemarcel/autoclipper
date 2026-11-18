@@ -81,8 +81,11 @@ class DiscordNotifier:
                     "inline": True,
                 },
                 {
-                    "name": "☁️ Google Drive (Master 1080p60 + Backup Limpo + .SRT)",
-                    "value": f"[📂 Abrir Pasta do Corte]({cut.drive_folder_url}) • [🎬 Master 1080p60]({cut.master_file_url})",
+                    "name": f"📥 Download Direto & Drive (Auto-exclusão em {self.profile.publishing.drive_retention_days}d)",
+                    "value": (
+                        f"[⬇️ Baixar Vídeo Direto (Sem acesso ao Drive)]({cut.download_url or cut.master_file_url})\n"
+                        f"[👁️ Abrir no Navegador]({cut.master_file_url}) • [📂 Pasta do Proprietário]({cut.drive_folder_url})"
+                    ),
                     "inline": False,
                 },
             ],
@@ -196,7 +199,15 @@ class DiscordNotifier:
                 }
             ]
 
-        row2_buttons: List[Dict[str, Any]] = []
+        row2_buttons: List[Dict[str, Any]] = [
+            {
+                "type": 2,
+                "style": 2,
+                "label": "Copiar Descrição",
+                "emoji": {"name": "📋"},
+                "custom_id": f"copy_caption:{cut_id}",
+            }
+        ]
         if not audio_cleaned:
             row2_buttons.append(
                 {

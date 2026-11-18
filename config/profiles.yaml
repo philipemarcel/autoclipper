@@ -68,6 +68,8 @@ profiles:
       # Horário de silêncio opcional na madrugada (BRT): evita queimar posts entre 03h e 09h (exceto botão "Postar Agora")
       quiet_hours_brt: [3, 9]
       timezone: "America/Sao_Paulo"
+      # Exclui automaticamente os arquivos de vídeo do Google Drive após N dias (preservando histórico contra repetição)
+      drive_retention_days: 10
 
       instagram:
         enabled: false
@@ -76,7 +78,12 @@ profiles:
 
       tiktok:
         enabled: true
-        # "inbox" = cai pronto nos rascunhos/notificações do app TikTok sem exigir auditoria comercial
-        # "direct" = publica 100% direto no feed (ative quando seu app for aprovado no TikTok Developers)
-        mode: "inbox"
+        # "direct" = envia via Direct Post (/video/init/) com legenda/hashtags já anexadas no TikTok!
+        # Nota TikTok pré-aprovação: antes de aprovar o app em Production, só funciona com `privacy_level: "SELF_ONLY"`
+        # E com sua conta do TikTok em modo Privado (assim você só muda a visibilidade no app e posta sem digitar nada).
+        # Se a sua conta estiver Pública antes da aprovação, `fallback_to_inbox: true` envia para a Caixa de Entrada sem quebrar.
+        # Após o TikTok aprovar o app em Production, troque `privacy_level` para "PUBLIC_TO_EVERYONE".
+        mode: "direct"
+        privacy_level: "SELF_ONLY"
+        fallback_to_inbox: true
         access_token_env: "TIKTOK_ACCESS_TOKEN"

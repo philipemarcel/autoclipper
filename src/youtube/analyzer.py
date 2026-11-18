@@ -100,6 +100,7 @@ class YouTubeMomentAnalyzer:
         Dado um canal do YouTube (ex: `https://www.youtube.com/@Gameplayrj`), verifica automaticamente:
           1. A aba `/streams` (Lives ao vivo + Repescagem das últimas lives encerradas!)
           2. A aba `/videos` (Vídeos novos publicados no canal!)
+        Usa extração HTTP rápida + feed RSS oficial (evitando timeouts do yt-dlp em canais grandes).
         """
         base = channel_url.strip().rstrip("/")
         if base.endswith(("/videos", "/streams", "/shorts")):
@@ -108,8 +109,33 @@ class YouTubeMomentAnalyzer:
             tabs = [f"{base}/streams", f"{base}/videos"]
 
         urls: List[str] = []
-        yt_args = get_ytdlp_youtube_args(work_dir)
+        channel_id: Optional[str] = None
+        req_headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8"}
+
         for tab_url in tabs:
+            tab_found = 0
+            try:
+                resp = requests.get(tab_url, headers=req_headers, timeout=15)
+                if resp.ok:
+                    if not channel_id:
+                        cid_m = re.search(r'"externalId":"(UC[A-Za-z0-9_-]{20,})"', resp.text)
+                        if cid_m:
+                            channel_id = cid_m.group(1)
+                    for vid in re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', resp.text):
+                        watch_url = f"https://www.youtube.com/watch?v={vid}"
+                        if watch_url not in urls:
+                            urls.append(watch_url)
+                            tab_found += 1
+                            if tab_found >= max(1, max_items):
+                                break
+            except Exception as exc:
+                logger.warning("Aviso ao consultar aba YouTube %s via HTTP: %s", tab_url, exc)
+
+            if tab_found > 0:
+                continue
+
+            # Fallback via yt-dlp apenas se HTTP direto não retornou vídeos nesta aba
+            yt_args = get_ytdlp_youtube_args(work_dir)
             cmd = [
                 sys.executable,
                 "-m",
@@ -122,7 +148,7 @@ class YouTubeMomentAnalyzer:
                 tab_url,
             ]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=45)
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=20)
                 data = json.loads(proc.stdout)
                 for entry in data.get("entries") or []:
                     vid = entry.get("id")
@@ -133,6 +159,17 @@ class YouTubeMomentAnalyzer:
                         urls.append(e_url)
             except Exception as exc:
                 logger.warning("Aviso ao listar aba YouTube %s: %s", tab_url, exc)
+
+        if not urls and channel_id:
+            try:
+                rss = requests.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}", timeout=12)
+                if rss.ok:
+                    for vid in re.findall(r"<yt:videoId>([A-Za-z0-9_-]{11})</yt:videoId>", rss.text)[: max(1, max_items)]:
+                        watch_url = f"https://www.youtube.com/watch?v={vid}"
+                        if watch_url not in urls:
+                            urls.append(watch_url)
+            except Exception:
+                pass
         return urls
 
     def discover_moments(

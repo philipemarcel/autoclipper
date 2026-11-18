@@ -60,6 +60,7 @@ def load_profiles(config_path: Optional[Path] = None, only_enabled: bool = True)
                 drip_interval_minutes=int(pub_raw.get("drip_interval_minutes", 75)),
                 quiet_hours_brt=pub_raw.get("quiet_hours_brt", [3, 9]),
                 timezone=str(pub_raw.get("timezone", "America/Sao_Paulo")),
+                drive_retention_days=int(pub_raw.get("drive_retention_days", 10)),
                 instagram=InstagramPublishConfig(**ig_raw),
                 tiktok=TikTokPublishConfig(**tt_raw),
             ),

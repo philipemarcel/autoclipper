@@ -20,9 +20,10 @@ CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB por chunk
 class TikTokPublisher:
     """
     Publicador oficial TikTok Content Posting API v2:
-      - `mode == "inbox"` (Padrão imediato sem auditoria comercial): envia o vídeo direto para a
-        Caixa de Entrada/Rascunhos do seu app TikTok pronto para 1 toque final.
-      - `mode == "direct"` (Pós-auditoria do app no TikTok Developers): publica 100% direto no feed público.
+      - `mode == "direct"` (Video Init `/v2/post/publish/video/init/`): envia vídeo COM descrição/hashtags em `post_info.title`.
+        Antes da aprovação em Production, só funciona com `privacy_level="SELF_ONLY"` e conta TikTok configurada como Privada.
+      - `mode == "inbox"` (Inbox Init `/v2/post/publish/inbox/video/init/`): envia para Caixa de Entrada/Rascunhos sem auditoria,
+        mas a API de inbox do TikTok não aceita `post_info` (sem descrição automática).
     """
 
     def __init__(
@@ -33,6 +34,9 @@ class TikTokPublisher:
         tt_cfg = profile.publishing.tiktok
         self.enabled = tt_cfg.enabled
         self.mode = tt_cfg.mode.lower().strip()
+        self.privacy_level = (tt_cfg.privacy_level or "PUBLIC_TO_EVERYONE").upper().strip()
+        self.fallback_to_inbox = bool(tt_cfg.fallback_to_inbox)
+        self.last_publish_mode = ""
         self.access_token = (access_token or get_env_secret(tt_cfg.access_token_env, required=False)).strip()
         self.refresh_token = os.getenv("TIKTOK_REFRESH_TOKEN", "").strip()
         self.client_key = os.getenv("TIKTOK_CLIENT_KEY", "").strip()
@@ -86,37 +90,15 @@ class TikTokPublisher:
             "Content-Type": "application/json; charset=UTF-8",
         }
 
-        if self.mode == "direct":
-            endpoint = f"{TIKTOK_API_BASE}/post/publish/video/init/"
-            init_body: Dict[str, Any] = {
-                "post_info": {
-                    "title": caption[:2200],
-                    "privacy_level": "PUBLIC_TO_EVERYONE",
-                    "disable_duet": False,
-                    "disable_comment": False,
-                    "disable_stitch": False,
-                },
-                "source_info": {
-                    "source": "FILE_UPLOAD",
-                    "video_size": video_size,
-                    "chunk_size": video_size if total_chunks == 1 else chunk_size,
-                    "total_chunk_count": total_chunks,
-                },
-            }
-        else:
-            endpoint = f"{TIKTOK_API_BASE}/post/publish/inbox/video/init/"
-            init_body = {
-                "source_info": {
-                    "source": "FILE_UPLOAD",
-                    "video_size": video_size,
-                    "chunk_size": video_size if total_chunks == 1 else chunk_size,
-                    "total_chunk_count": total_chunks,
-                }
-            }
+        source_info = {
+            "source": "FILE_UPLOAD",
+            "video_size": video_size,
+            "chunk_size": video_size if total_chunks == 1 else chunk_size,
+            "total_chunk_count": total_chunks,
+        }
 
-        resp = requests.post(endpoint, headers=headers, json=init_body, timeout=30)
-        resp.raise_for_status()
-        payload = resp.json().get("data", {})
+        payload, used_mode = self._init_publish_session(headers, caption, source_info)
+        self.last_publish_mode = used_mode
         publish_id = str(payload["publish_id"])
         upload_url = str(payload["upload_url"])
 
@@ -138,5 +120,68 @@ class TikTokPublisher:
                 up_resp = requests.put(upload_url, headers=put_headers, data=data_bytes, timeout=240)
                 up_resp.raise_for_status()
 
-        logger.info("TikTok (%s) enviado com sucesso! publish_id=%s", self.mode, publish_id)
+        logger.info("TikTok (%s / %s) enviado com sucesso! publish_id=%s", self.mode, used_mode, publish_id)
         return publish_id
+
+    @staticmethod
+    def _extract_error_code(resp: requests.Response) -> str:
+        try:
+            err = resp.json().get("error", {})
+            return str(err.get("code") or "").strip().lower()
+        except Exception:
+            return ""
+
+    def _post_init_request(self, endpoint: str, headers: Dict[str, str], body: Dict[str, Any]) -> requests.Response:
+        return requests.post(endpoint, headers=headers, json=body, timeout=30)
+
+    def _init_publish_session(
+        self,
+        headers: Dict[str, str],
+        caption: str,
+        source_info: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], str]:
+        direct_endpoint = f"{TIKTOK_API_BASE}/post/publish/video/init/"
+        inbox_endpoint = f"{TIKTOK_API_BASE}/post/publish/inbox/video/init/"
+
+        if self.mode == "direct":
+            tried_privacy = self.privacy_level or "PUBLIC_TO_EVERYONE"
+            for privacy in ([tried_privacy, "SELF_ONLY"] if tried_privacy != "SELF_ONLY" else ["SELF_ONLY"]):
+                init_body: Dict[str, Any] = {
+                    "post_info": {
+                        "title": caption[:2200],
+                        "privacy_level": privacy,
+                        "disable_duet": False,
+                        "disable_comment": False,
+                        "disable_stitch": False,
+                    },
+                    "source_info": source_info,
+                }
+                resp = self._post_init_request(direct_endpoint, headers, init_body)
+                if resp.ok:
+                    return resp.json().get("data", {}), f"direct:{privacy}"
+
+                err_code = self._extract_error_code(resp)
+                if err_code == "unaudited_client_can_only_post_to_private_accounts":
+                    logger.warning(
+                        "TikTok Direct Post com `%s` bloqueado pré-aprovação (%s).",
+                        privacy,
+                        err_code,
+                    )
+                    continue
+                resp.raise_for_status()
+
+            if self.fallback_to_inbox:
+                logger.warning(
+                    "Conta TikTok não está Privada ou app aguarda auditoria; fazendo fallback para TikTok Inbox."
+                )
+                inbox_resp = self._post_init_request(inbox_endpoint, headers, {"source_info": source_info})
+                inbox_resp.raise_for_status()
+                return inbox_resp.json().get("data", {}), "inbox_fallback"
+
+            raise RuntimeError(
+                "TikTok Direct Post pré-aprovação exige `privacy_level=SELF_ONLY` E conta TikTok configurada como Privada."
+            )
+
+        inbox_resp = self._post_init_request(inbox_endpoint, headers, {"source_info": source_info})
+        inbox_resp.raise_for_status()
+        return inbox_resp.json().get("data", {}), "inbox"

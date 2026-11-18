@@ -6,8 +6,9 @@ import logging
 import mimetypes
 import os
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,27 @@ class DriveStore:
                 _, done = downloader.next_chunk()
         return dest_path
 
+    def _grant_anyone_reader_permission(self, file_id: str) -> None:
+        self.service.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"},
+            fields="id",
+        ).execute()
+
+    def ensure_public_download_url(self, file_ref: str) -> str:
+        """
+        Libera leitura para qualquer pessoa com o link (sem login na conta proprietária do Drive)
+        e retorna uma URL de download direto independente (`uc?export=download&id=...&confirm=t`).
+        Em modo local/montado, retorna o URI local para manter compatibilidade em testes.
+        """
+        if not file_ref:
+            return ""
+        if self.mode != "api":
+            p = Path(file_ref)
+            return p.resolve().as_uri() if p.exists() else str(file_ref)
+        self._grant_anyone_reader_permission(file_ref)
+        return f"https://drive.google.com/uc?export=download&id={file_ref}&confirm=t"
+
     def make_public_download_url(self, file_id: str) -> str:
         """
         Habilita leitura pública por link no arquivo do Drive e retorna a URL HTTPS direta
@@ -191,13 +213,118 @@ class DriveStore:
             raise RuntimeError(
                 "Para publicar no Instagram Reels via API, configure GDRIVE_TOKEN_JSON para gerar URL HTTPS pública."
             )
-        self.service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-            fields="id",
-        ).execute()
+        self._grant_anyone_reader_permission(file_id)
         # Endpoint direto compatível com download binário sem página de confirmação
-        return f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={self._get_or_omit_api_key()}" if os.getenv("GOOGLE_API_KEY") else f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
+        return (
+            f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={self._get_or_omit_api_key()}"
+            if os.getenv("GOOGLE_API_KEY")
+            else f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
+        )
+
+    def delete_ref(self, file_or_folder_ref: str) -> bool:
+        """
+        Remove permanentemente um arquivo ou pasta do Google Drive (ou do espelho local/montado).
+        Retorna True se foi excluído ou já não existia (`404`).
+        """
+        ref = str(file_or_folder_ref or "").strip()
+        if not ref:
+            return True
+
+        if self.mode != "api":
+            target = Path(ref)
+            if not target.exists():
+                return True
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+            return True
+
+        try:
+            self.service.files().delete(fileId=ref).execute()
+            return True
+        except Exception as exc:
+            status_code = getattr(getattr(exc, "resp", None), "status", None)
+            if status_code == 404 or "notFound" in str(exc):
+                return True
+            logger.warning("Falha ao excluir referência `%s` do Google Drive: %s", ref, exc)
+            return False
+
+    def cleanup_expired_cuts(
+        self,
+        processed_state: Dict[str, Any],
+        retention_days: int = 10,
+        now_utc: Optional[datetime] = None,
+        active_queue_cut_ids: Optional[Set[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Exclui automaticamente do Google Drive os vídeos/pastas de cortes mais antigos que `retention_days` dias,
+        preservando os metadados leves de histórico em `processed_state` para nunca repetir cortes antigos.
+        """
+        days = max(1, int(retention_days))
+        now = now_utc or datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=days)
+        protected_ids = active_queue_cut_ids or set()
+
+        deleted_ids: List[str] = []
+        failed_ids: List[str] = []
+        checked = 0
+
+        for cut in processed_state.get("cuts", []):
+            if cut.get("drive_deleted"):
+                continue
+            cut_id = str(cut.get("cut_id", ""))
+            if cut_id in protected_ids:
+                continue
+
+            raw_ts = str(cut.get("created_at") or "").strip()
+            if not raw_ts:
+                continue
+            try:
+                norm_ts = raw_ts[:-1] + "+00:00" if raw_ts.endswith("Z") else raw_ts
+                created_dt = datetime.fromisoformat(norm_ts)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+
+            checked += 1
+            if created_dt > cutoff:
+                continue
+
+            folder_ref = str(cut.get("drive_folder_id") or "").strip()
+            removed = False
+            if folder_ref:
+                removed = self.delete_ref(folder_ref)
+            else:
+                file_refs = [
+                    str(cut.get(k) or "").strip()
+                    for k in ("master_file_id", "clean_file_id", "srt_file_id")
+                    if str(cut.get(k) or "").strip()
+                ]
+                removed = all(self.delete_ref(fr) for fr in file_refs) if file_refs else True
+
+            if removed:
+                cut["drive_deleted"] = True
+                cut["drive_deleted_at"] = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                cut["drive_folder_id"] = ""
+                cut["drive_folder_url"] = ""
+                cut["master_file_id"] = ""
+                cut["master_file_url"] = ""
+                cut["clean_file_id"] = ""
+                cut["srt_file_id"] = ""
+                cut["download_url"] = ""
+                deleted_ids.append(cut_id)
+            else:
+                failed_ids.append(cut_id)
+
+        return {
+            "checked": checked,
+            "deleted": len(deleted_ids),
+            "deleted_cut_ids": deleted_ids,
+            "failed_cut_ids": failed_ids,
+            "changed": bool(deleted_ids),
+        }
 
     @staticmethod
     def _get_or_omit_api_key() -> str:

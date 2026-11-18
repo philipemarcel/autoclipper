@@ -118,6 +118,7 @@ def process_single_cluster(
 
         folder_id, folder_url = store.ensure_folder_path(drive_parts)
         master_id, master_url = store.upload_file(rendered.master_mp4, drive_parts, "master_1080p60.mp4")
+        download_url = store.ensure_public_download_url(master_id)
         clean_id, _ = store.upload_file(rendered.clean_mp4, drive_parts, "limpo_1080p60.mp4")
         srt_id, _ = store.upload_file(srt_path, drive_parts, "legenda.srt")
         store.upload_file(ass_path, drive_parts, "legenda.ass")
@@ -145,6 +146,7 @@ def process_single_cluster(
             clean_file_id=clean_id,
             srt_file_id=srt_id,
             created_at=_utc_now_iso(),
+            download_url=download_url,
         )
 
         meta_path = cut_work_dir / "metadata.json"
@@ -222,10 +224,10 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
                 logger.exception("Erro ao processar cluster %s: %s", cluster.cluster_id, exc)
 
         # Monitoramento automático 24/7 dos canais do YouTube configurados no perfil (vídeos novos + lives + repescagem)
-        # Usa cota independente da Twitch para que os canais do YouTube nunca fiquem bloqueados quando a Twitch tem muitos clipes.
+        # Garante cota justa de 1 corte novo por canal antes de encerrar, evitando que o 1º canal consuma toda a cota.
         if prof.youtube_channels:
             yt_analyzer = YouTubeMomentAnalyzer(prof)
-            yt_budget = 2 if max_cuts_override is None else max(1, min(2, max_cuts_override))
+            yt_budget = max(len(prof.youtube_channels), 2) if max_cuts_override is None else max(1, min(3, max_cuts_override))
             yt_created = 0
             for ch_url in prof.youtube_channels:
                 if yt_created >= yt_budget:
@@ -233,8 +235,9 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
                 recent_urls = yt_analyzer.discover_channel_recent_urls(
                     ch_url, max_items=1, work_dir=work_root / "yt_meta"
                 )
+                channel_done = False
                 for v_url in recent_urls:
-                    if yt_created >= yt_budget:
+                    if yt_created >= yt_budget or channel_done:
                         break
                     # Evita reanalisar um vídeo/VOD do YouTube que já gerou 2+ cortes
                     vid_match = __import__("re").search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{6,})", v_url)
@@ -252,11 +255,50 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
                             process_single_cluster(prof, ytc, store, theme, processed_state, work_root)
                             total_created += 1
                             yt_created += 1
+                            channel_done = True
                             break
                     except Exception as exc:
                         logger.warning("Aviso ao monitorar vídeo YouTube %s: %s", v_url, exc)
 
+    retention_days = max((int(p.publishing.drive_retention_days) for p in active_profiles), default=10)
+    _run_drive_retention_cleanup(store, processed_state, retention_days=retention_days)
     return total_created
+
+
+def _run_drive_retention_cleanup(
+    store: DriveStore,
+    processed_state: Dict[str, Any],
+    retention_days: int = 10,
+) -> Dict[str, Any]:
+    queue_state = store.load_state_json("drip_queue.json", default={"items": []})
+    pending_ids = {
+        str(it.get("cut_id", ""))
+        for it in queue_state.get("items", [])
+        if it.get("status") == "pending" and it.get("cut_id")
+    }
+    report = store.cleanup_expired_cuts(
+        processed_state=processed_state,
+        retention_days=retention_days,
+        active_queue_cut_ids=pending_ids,
+    )
+    if report["changed"]:
+        store.save_state_json(PROCESSED_STATE_FILE, processed_state)
+        logger.info(
+            "Limpeza automática do Drive (>%dd): %d corte(s) expirado(s) excluído(s).",
+            retention_days,
+            report["deleted"],
+        )
+    return report
+
+
+def cmd_cleanup(retention_days: Optional[int] = None) -> int:
+    profiles = load_profiles(only_enabled=False)
+    default_days = max((int(p.publishing.drive_retention_days) for p in profiles), default=10)
+    days = retention_days if retention_days is not None else default_days
+    store = DriveStore()
+    processed_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
+    report = _run_drive_retention_cleanup(store, processed_state, retention_days=days)
+    return int(report["deleted"])
 
 
 def cmd_youtube(
@@ -283,13 +325,21 @@ def cmd_youtube(
     notifier = DiscordNotifier(profile)
 
     analyzer = YouTubeMomentAnalyzer(profile)
-    info, clusters = analyzer.discover_moments(
-        url=url.strip(),
-        max_cuts=max(1, min(10, int(max_cuts))),
-        work_dir=work_root / "meta",
-        time_range_str=time_range,
-        processed_state=processed_state,
-    )
+    try:
+        info, clusters = analyzer.discover_moments(
+            url=url.strip(),
+            max_cuts=max(1, min(10, int(max_cuts))),
+            work_dir=work_root / "meta",
+            time_range_str=time_range,
+            processed_state=processed_state,
+        )
+    except Exception as exc:
+        logger.exception("Erro ao analisar URL do YouTube (%s): %s", url, exc)
+        notifier.post_status_reply(
+            "",
+            f"❌ Não consegui analisar o vídeo <{url}>: `{str(exc)[:300]}`",
+        )
+        return 0
 
     if not clusters:
         notifier.post_status_reply(
@@ -365,6 +415,7 @@ def cmd_discord_action(
 
             drive_parts: List[str] = cut_dict.get("drive_parts") or ["cortes", profile.twitch_login, f"cleaned_{cut_id}"]
             master_id, master_url = store.upload_file(out_master, drive_parts, "master_1080p60.mp4")
+            download_url = store.ensure_public_download_url(master_id)
             clean_id, _ = store.upload_file(out_clean, drive_parts, "limpo_1080p60.mp4")
 
             preview_mp4 = work_dir / "preview_discord.mp4"
@@ -372,6 +423,7 @@ def cmd_discord_action(
 
             cut_dict["master_file_id"] = master_id
             cut_dict["master_file_url"] = master_url
+            cut_dict["download_url"] = download_url
             cut_dict["clean_file_id"] = clean_id
             cut_dict["audio_cleaned"] = True
             cut_dict["status"] = "pending_approval"
@@ -444,6 +496,8 @@ def cmd_drip_publish() -> int:
                         f"✅ **Fila Espaçada disparada!** Corte `{cut['cut_id']}` publicado: `{json.dumps(rep['results'], ensure_ascii=False)}`",
                     )
         logger.info("Verificação da Fila Espaçada concluída: %d post(s) disparado(s).", len(reports))
+        retention_days = max((int(p.publishing.drive_retention_days) for p in profiles.values()), default=10)
+        _run_drive_retention_cleanup(store, processed_state, retention_days=retention_days)
         return len(reports)
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -498,6 +552,9 @@ def build_cli() -> argparse.ArgumentParser:
 
     sub.add_parser("drip-publish", help="Publica cortes vencidos na Fila Espaçada Inteligente.")
 
+    p_clean = sub.add_parser("cleanup", help="Remove do Google Drive vídeos mais antigos que N dias.")
+    p_clean.add_argument("--days", type=int, default=None, help="Dias de retenção (padrão: config de profiles.yaml).")
+
     p_colab = sub.add_parser("colab-loop", help="Loop contínuo com GPU para Google Colab Ultra (até 24h).")
     p_colab.add_argument("--interval-minutes", type=float, default=10.0)
     p_colab.add_argument("--max-hours", type=float, default=23.5)
@@ -531,6 +588,8 @@ def main() -> None:
         )
     elif args.command == "drip-publish":
         cmd_drip_publish()
+    elif args.command == "cleanup":
+        cmd_cleanup(retention_days=args.days)
     elif args.command == "colab-loop":
         cmd_colab_loop(
             interval_minutes=args.interval_minutes,
