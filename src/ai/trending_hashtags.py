@@ -5,6 +5,7 @@ import re
 import time
 import unicodedata
 import xml.etree.ElementTree as ET
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -12,14 +13,20 @@ import requests
 logger = logging.getLogger(__name__)
 
 GOOGLE_TRENDS_BR_RSS = "https://trends.google.com/trending/rss?geo=BR"
+YT_SEARCH_URL = "https://www.youtube.com/results"
+YT_SUGGEST_URL = "https://suggestqueries.google.com/complete/search"
+
 _TRENDS_CACHE: Dict[str, Tuple[float, List[str]]] = {}
+_BENCHMARK_CACHE: Dict[str, Tuple[float, Dict[str, List[str]]]] = {}
 _CACHE_TTL_SEC = 900.0  # 15 minutos
+_BENCHMARK_TTL_SEC = 1800.0  # 30 minutos
 
 GAME_HASHTAG_ALIASES: Dict[str, List[str]] = {
     "grand theft auto v": ["#gtarp", "#gtav"],
     "grand theft auto vi": ["#gta6", "#gta"],
+    "gta 6": ["#gta6", "#gta"],
     "counter-strike": ["#cs2"],
-    "valorant": ["#valorant"],
+    "valorant": ["#valorantbr"],
     "league of legends": ["#lolbr"],
     "just chatting": ["#podcast", "#react"],
     "irl": ["#irl"],
@@ -28,6 +35,17 @@ GAME_HASHTAG_ALIASES: Dict[str, List[str]] = {
     "arc raiders": ["#arcraiders"],
     "dead by daylight": ["#dbd"],
 }
+
+# Hashtags campeãs em cortes de jogos no TikTok/Reels BR observadas em benchmarks da web
+GAMING_CLIP_BENCHMARK_TAGS: List[str] = [
+    "#cortesdegames",
+    "#gamerbrasil",
+    "#humorgamer",
+    "#tiktokgames",
+    "#fyp",
+    "#fy",
+    "#viral",
+]
 
 
 def slugify_hashtag(text: str) -> str:
@@ -72,6 +90,99 @@ def fetch_brazil_realtime_trends(limit: int = 18) -> List[str]:
         return cached[1][:limit] if cached else []
 
 
+def fetch_web_clip_benchmarks(
+    creator_name: str,
+    game_name: str = "",
+    limit: int = 8,
+) -> Dict[str, List[str]]:
+    """
+    Consulta referências reais de cortes/clips de jogos na web (títulos virais de Shorts/Reels/TikTok,
+    hashtags mais usadas nesses clipes e termos reais buscados agora no Autocomplete Web/YouTube).
+    """
+    clean_creator = re.sub(r"\s+", " ", str(creator_name or "").strip())
+    clean_game = re.sub(r"\s+", " ", str(game_name or "").strip())
+    if clean_game.lower() in {"live", "youtube", "kick", "twitch", "games"}:
+        clean_game = ""
+    cache_key = f"{clean_creator.lower()}|{clean_game.lower()}"
+
+    now = time.time()
+    cached = _BENCHMARK_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _BENCHMARK_TTL_SEC:
+        return {
+            "titles": cached[1]["titles"][:limit],
+            "hashtags": cached[1]["hashtags"][:12],
+            "search_terms": cached[1]["search_terms"][:8],
+        }
+
+    titles: List[str] = []
+    tag_counter: Counter[str] = Counter()
+    search_terms: List[str] = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    }
+
+    query_str = " ".join(x for x in ["cortes", clean_creator, clean_game] if x).strip() or "cortes games"
+    try:
+        r = requests.get(
+            YT_SEARCH_URL,
+            params={"search_query": query_str},
+            headers=headers,
+            timeout=7,
+        )
+        if r.ok:
+            shorts_hits = re.findall(r'"overlayMetadata":\{"primaryText":\{"content":"([^"]{8,120})"\}', r.text)
+            video_hits = re.findall(
+                r'"videoRenderer":\{"videoId":"[^"]+","thumbnail":.*?"title":\{"runs":\[\{"text":"([^"]{8,120})"\}',
+                r.text,
+            )
+            for raw_t in shorts_hits + video_hits:
+                clean_t = raw_t.encode("utf-8", "ignore").decode("utf-8").replace('\\"', '"').strip()
+                if not clean_t or any(bad in clean_t.lower() for bad in ("inscreva-se", "filtros de pesquisa", "atalhos do teclado")):
+                    continue
+                for ht in re.findall(r"#[A-Za-zÀ-ÿ0-9_]{2,30}", clean_t):
+                    norm_ht = slugify_hashtag(ht)
+                    if norm_ht and norm_ht not in {"#shorts", "#youtubeshorts", "#short"}:
+                        tag_counter[norm_ht] += 1
+                # Guarda versão limpa do título sem excesso de # no fim para servir de referência de gancho
+                no_tags_t = re.sub(r"\s*#[A-Za-zÀ-ÿ0-9_]+", "", clean_t).strip()
+                if len(no_tags_t) >= 12 and no_tags_t not in titles:
+                    titles.append(no_tags_t[:95])
+    except Exception as exc:
+        logger.debug("Aviso ao buscar referências web de cortes (%s): %s", query_str, exc)
+
+    for ds, q_val in [("yt", f"{clean_creator} {clean_game}".strip()), ("", f"{clean_creator} tiktok".strip())]:
+        if not q_val:
+            continue
+        try:
+            params = {"client": "firefox", "q": q_val}
+            if ds:
+                params["ds"] = ds
+            sr = requests.get(YT_SUGGEST_URL, params=params, timeout=5)
+            if sr.ok:
+                data = sr.json()
+                if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list):
+                    for term in data[1][:6]:
+                        t_s = str(term).strip()
+                        if t_s and t_s not in search_terms:
+                            search_terms.append(t_s)
+        except Exception:
+            pass
+
+    top_hashtags = [t for t, _ in tag_counter.most_common(12)]
+    result = {
+        "titles": titles[:10],
+        "hashtags": top_hashtags,
+        "search_terms": search_terms[:10],
+    }
+    _BENCHMARK_CACHE[cache_key] = (now, result)
+    return {
+        "titles": result["titles"][:limit],
+        "hashtags": result["hashtags"][:12],
+        "search_terms": result["search_terms"][:8],
+    }
+
+
 def suggest_dynamic_hashtags(
     creator_handle: str,
     platform_mode: str = "",
@@ -80,13 +191,15 @@ def suggest_dynamic_hashtags(
     transcript_snippet: str = "",
     max_tags: int = 5,
     base_discovery_tags: Optional[List[str]] = None,
+    web_benchmark_tags: Optional[List[str]] = None,
 ) -> List[str]:
     """
-    Monta lista dinâmica de hashtags voltadas para o que pode entrar em alta naquele momento:
+    Monta lista dinâmica de hashtags comparando tendências reais + benchmarks de cortes de jogos na web:
       1. Tag do criador (`#alanzoka`, `#davyjones`, `#bistecone`, `#gameplayrj`, `#paulinholoko`).
-      2. Tags específicas do jogo/evento em alta (`#gta6`, `#gtarp`, `#cs2`, etc.).
-      3. Tópico real do Google Trends Brasil se aparecer no título/fala do corte!
-      4. Tags dinâmicas de descoberta viral (`#fy`, `#fyp`, `#viral`, `#clips`).
+      2. Tag específica do jogo/assunto (`#gta6`, `#gtarp`, `#cs2`, etc.).
+      3. Tópico real do Google Trends Brasil se aparecer no título/fala do corte.
+      4. Hashtag viral extraída de benchmarks reais na web (ex.: `#cortesdegames`, `#gamerbrasil`, `#humorgamer`).
+      5. Tags dinâmicas de descoberta no TikTok/Reels (`#fyp`, `#fy`, `#viral`).
     """
     tags: List[str] = []
 
@@ -110,13 +223,18 @@ def suggest_dynamic_hashtags(
         if len(t_clean) >= 4 and t_clean in haystack:
             _add(trend)
 
-    # Descoberta de algoritmo ForYou / Reels
-    for disc in (base_discovery_tags or ["#fy", "#fyp", "#viral", "#cortes"]):
+    # Hashtags de benchmarks reais na web de clipes parecidos
+    for wtag in (web_benchmark_tags or []):
+        _add(wtag)
+
+    # Nicho gamer BR + ForYou / Reels
+    for disc in (base_discovery_tags or GAMING_CLIP_BENCHMARK_TAGS):
         _add(disc)
 
-    if platform_mode.startswith("youtube"):
-        _add("#shorts")
-    elif platform_mode.startswith("kick"):
+    for fallback_tag in GAMING_CLIP_BENCHMARK_TAGS:
+        _add(fallback_tag)
+
+    if platform_mode.startswith("kick"):
         _add("#kickbrasil")
 
     return tags[:max_tags]

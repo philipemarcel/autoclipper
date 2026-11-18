@@ -720,6 +720,14 @@ def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):
 
     monkeypatch.setattr(th, "fetch_brazil_realtime_trends", lambda limit=20: ["kscerato", "cartola", "trailer novo"])
     monkeypatch.setattr("src.ai.director.fetch_brazil_realtime_trends", lambda limit=15: ["kscerato", "cartola"])
+    monkeypatch.setattr(
+        "src.ai.director.fetch_web_clip_benchmarks",
+        lambda creator, game="", limit=6: {
+            "titles": ["DAVY JONES PIROU NO CS2!", "KSCERATO FEZ O IMPOSSIVEL"],
+            "hashtags": ["#cortesdegames", "#cs2brasil", "#fyp"],
+            "search_terms": ["davy jones cs2", "kscerato clutch"],
+        },
+    )
 
     tags = th.suggest_dynamic_hashtags(
         creator_handle="davyjones",
@@ -729,11 +737,12 @@ def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):
         transcript_snippet="olha o kscerato jogando",
         max_tags=5,
         base_discovery_tags=["#fy", "#fyp", "#viral"],
+        web_benchmark_tags=["#cortesdegames", "#cs2brasil"],
     )
     assert tags[0] == "#davyjones"
     assert "#cs2" in tags
     assert "#kscerato" in tags
-    assert "#fy" in tags
+    assert "#cortesdegames" in tags
     assert "#twitchbr" not in tags
 
     prof = _make_profile()
@@ -759,6 +768,9 @@ def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):
     prompt = director._build_prompt(cl, [WordTimestamp("bora", 1.0, 1.5)], 40.0, 20.0)
     assert "kscerato" in prompt
     assert "Google Trends tempo real" in prompt
+    assert "REFERÊNCIAS REAIS DE LEGENDAS DE CLIPS DE JOGOS NA WEB" in prompt
+    assert "DAVY JONES PIROU NO CS2!" in prompt
+    assert "#cortesdegames" in prompt
     assert "DESCRIÇÃO COMPACTA, DESCRITIVA E COM GANCHO" in prompt
 
     # Garante que chamadas robóticas de engajamento sejam limpas sem amputar frases narrativas reais

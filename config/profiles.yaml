@@ -54,14 +54,14 @@ profiles:
       watermark_text: ""
 
     copy:
-      # Descrição compacta (40-85 chars) descrevendo a cena + gancho, com 4-5 hashtags em alta no momento
+      # Descrição compacta (40-85 chars) comparada com cortes virais da web + 4-5 hashtags em alta no TikTok/Reels
       style: "compact_hook"
       max_hashtags: 5
       base_hashtags:
-        - "#fy"
+        - "#cortesdegames"
+        - "#gamerbrasil"
         - "#fyp"
         - "#viral"
-        - "#cortes"
 
     discord:
       bot_token_env: "DISCORD_BOT_TOKEN"

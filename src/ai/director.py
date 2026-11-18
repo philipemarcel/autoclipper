@@ -8,7 +8,12 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from src.ai.trending_hashtags import fetch_brazil_realtime_trends, suggest_dynamic_hashtags
+from src.ai.trending_hashtags import (
+    GAMING_CLIP_BENCHMARK_TAGS,
+    fetch_brazil_realtime_trends,
+    fetch_web_clip_benchmarks,
+    suggest_dynamic_hashtags,
+)
 from src.models import DirectorDecision, MomentCluster, ProfileConfig, WordTimestamp
 
 logger = logging.getLogger(__name__)
@@ -152,6 +157,18 @@ class GeminiDirector:
 
         live_trends = fetch_brazil_realtime_trends(limit=15)
         trends_hint = ", ".join(live_trends) if live_trends else "(indisponível no momento)"
+        web_bench = fetch_web_clip_benchmarks(creator_name, cluster.game_name or "", limit=6)
+        ref_titles = web_bench.get("titles") or []
+        ref_tags = web_bench.get("hashtags") or []
+        search_terms = web_bench.get("search_terms") or []
+        ref_titles_block = (
+            "\n".join(f"  * {t}" for t in ref_titles)
+            if ref_titles
+            else "  * (sem amostra externa — use estilo viral direto de cortes BR de TikTok/Reels)"
+        )
+        web_tags_pool = ref_tags + [t for t in GAMING_CLIP_BENCHMARK_TAGS if t not in ref_tags]
+        web_tags_hint = " ".join(web_tags_pool[:10])
+        search_hint = ", ".join(search_terms[:6]) if search_terms else "(nenhum)"
         peak_line = (
             f"~{peak_hint_sec:.1f}s"
             if peak_hint_sec > 0
@@ -175,6 +192,10 @@ DADOS DO MOMENTO ({platform_label}):
 - Título da Live/Vídeo: {cluster.stream_title or "N/A"}
 - Títulos/temas deste momento: {json.dumps(clip_titles, ensure_ascii=False)}
 - Assuntos EM ALTA AGORA NO BRASIL (Google Trends tempo real): {trends_hint}
+- Buscas reais em alta para esse criador/jogo na Web: {search_hint}
+- REFERÊNCIAS REAIS DE LEGENDAS DE CLIPS DE JOGOS NA WEB (TikTok/Reels/Shorts):
+{ref_titles_block}
+- HASHTAGS MAIS USADAS EM CLIPS DE JOGOS VIRAIS NA WEB (TikTok/Reels): {web_tags_hint}
 - Duração total do vídeo bruto extraído: {raw_duration_sec:.2f}s
 - Ponto principal aproximado: {peak_line}
 
@@ -195,21 +216,23 @@ REGRAS OBRIGATÓRIAS DE EDIÇÃO:
    - Máximo 4 a 5 palavras curtas que aparecem na tela nos 2-3s iniciais.
    - Baseie-se LITERALMENTE no título/assunto do momento (`{cluster.dominant_title}`) ou na frase mais engraçada dita na transcrição.
    - PROIBIDO usar clichês genéricos de IA como "JOGADA DE OURO", "MOMENTO ÉPICO", "IMPERDÍVEL", "INACREDITÁVEL".
-4. DESCRIÇÃO COMPACTA, DESCRITIVA E COM GANCHO (`caption_text` e `hashtags`):
-   - `caption_text`: escreva **1 única frase curta e direta (ENTRE `40` E `85` CARACTERES no máximo — sem textão!)** explicando **o fato específico** da cena + **um gancho que dê vontade de assistir até o fim**.
-   - Seja concreto com os detalhes reais da transcrição/título (ex.: o objeto, jogo, pessoa ou erro exato), **sem entregar a punchline inteira** e sem precisar de 2 frases longas. Pode usar no máximo 1 emoji se combinar.
+4. LEGENDA E HASHTAGS COMPARADAS COM CLIPS VIRAIS DE JOGOS NA WEB (`caption_text` e `hashtags`):
+   - Antes de escrever, COMPARE o ritmo, o tamanho e o poder de retenção da sua `caption_text` com as "REFERÊNCIAS REAIS DE LEGENDAS DE CLIPS DE JOGOS NA WEB" acima (páginas reais do TikTok e Reels gamer BR).
+   - `caption_text`: **1 única frase curta e magnética (`35` a `80` caracteres no máximo)** — direta, coloquial brasileira, descrevendo **o fato curioso/absurdo da cena** com **um gancho que prenda até o fim**, no mesmo estilo real dos clips que viralizam no TikTok/Reels gamer.
    - ESTRITAMENTE PROIBIDO:
-     * Enrolação genérica de IA (ex. RUIM: `"tenta X, mas acaba atrapalhando tudo"`, `"a situação vira risada total"`, `"transforma num caos completo"`, `"deixou todo mundo sem reação"`, `"galera surtando"`).
-     * Textão acima de `85` caracteres (tem que caber antes do *"Ver mais"* no TikTok/Reels).
-     * Fala avulsa sem explicar a cena (ex. RUIM: `"não conhece nada, galera"`, `"vai ser muito foda"`).
-   - Exemplos de BOM tamanho e gancho (varie a estrutura conforme a cena):
-     * `"Alanzoka parou o carro errado e se arrependeu na hora 👀"`
-     * `"O momento em que o Bistecone quase perdeu o PS5 ao vivo 💀"`
-     * `"Davy Jones foi bancar o encanador e olha no que deu 😂"`
-   - `hashtags`: de 3 a {self.profile.copy.max_hashtags} hashtags focadas no que pode **ficar em alta neste momento** (ex: {default_tags}):
-     1) criador/participante em evidência (`#{creator_handle}`),
-     2) 1 ou 2 tags específicas do assunto/jogo/meme citado (e se algum tema em alta do Google Trends acima tiver ligação real com o clipe, inclua obrigatoriamente!),
-     3) 1 ou 2 tags fortes de descoberta/alcance no algoritmo (`#fy`, `#fyp`, `#viral`, `#react`, `#clips`). Evite tags genéricas mortas ou que não combinem com a plataforma.
+     * Tom de redação/jornalista longo (`"tenta X, mas acaba atrapalhando tudo"`, `"e a situação sai do controle"`, `"será que cumpre?"`, `"a situação vira risada total"`).
+     * Textão > `85` caracteres (precisa aparecer inteira na tela antes do *"Ver mais"*).
+     * Fala aleatória sem contexto (`"não conhece nada, galera"`, `"vai ser muito foda"`).
+   - Compare o nível de impacto real (varie conforme a cena):
+     * `"alanzoka caiu no pior bait possível no meio da fuga 💀"`
+     * `"o cara meteu um taser no davy jones bem na hora do roubo 😂"`
+     * `"bistecone apostou o PS5 ao vivo com o chat e olha nisso 👀"`
+   - `hashtags`: compare diretamente com "HASHTAGS MAIS USADAS EM CLIPS DE JOGOS VIRAIS NA WEB" e "Buscas reais em alta" acima, escolhendo de 4 a {self.profile.copy.max_hashtags} hashtags combinando:
+     1) criador (`#{creator_handle}`),
+     2) jogo/assunto em alta na web agora (ex: `#gta6`, `#gtarp`, `#cs2`, ou termo buscado acima se bater com a cena),
+     3) nicho real de clips de games BR no TikTok/Reels (`#cortesdegames`, `#gamerbrasil`, `#humorgamer`, `#tiktokgames`),
+     4) descoberta (`#fyp`, `#fy`, `#viral`).
+   - DESCRIÇÃO COMPACTA, DESCRITIVA E COM GANCHO garantida em poucas palavras!
 5. CORREÇÃO DE GRAFIA DO WHISPER (`word_corrections`):
    - Se notar na transcrição alguma palavra claramente ouvida errado pelo Whisper (ex: nome de jogo, gíria ou palavra trocada), inclua no dicionário `"word_corrections": {{"palavra_errada": "palavra_certa"}}` (caso contrário, `{{}}`).
 
