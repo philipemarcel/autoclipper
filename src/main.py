@@ -230,7 +230,9 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
             for ch_url in prof.youtube_channels:
                 if yt_created >= yt_budget:
                     break
-                recent_urls = yt_analyzer.discover_channel_recent_urls(ch_url, max_items=1)
+                recent_urls = yt_analyzer.discover_channel_recent_urls(
+                    ch_url, max_items=1, work_dir=work_root / "yt_meta"
+                )
                 for v_url in recent_urls:
                     if yt_created >= yt_budget:
                         break

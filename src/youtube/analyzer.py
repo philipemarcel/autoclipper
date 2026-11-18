@@ -95,7 +95,7 @@ class YouTubeMomentAnalyzer:
             raise RuntimeError(f"yt-dlp metadata falhou ({proc.returncode}): {err_msg}")
         return json.loads(proc.stdout)
 
-    def discover_channel_recent_urls(self, channel_url: str, max_items: int = 2) -> List[str]:
+    def discover_channel_recent_urls(self, channel_url: str, max_items: int = 2, work_dir: Optional[Path] = None) -> List[str]:
         """
         Dado um canal do YouTube (ex: `https://www.youtube.com/@Gameplayrj`), verifica automaticamente:
           1. A aba `/streams` (Lives ao vivo + Repescagem das últimas lives encerradas!)
@@ -108,6 +108,7 @@ class YouTubeMomentAnalyzer:
             tabs = [f"{base}/streams", f"{base}/videos"]
 
         urls: List[str] = []
+        yt_args = get_ytdlp_youtube_args(work_dir)
         for tab_url in tabs:
             cmd = [
                 sys.executable,
@@ -117,6 +118,7 @@ class YouTubeMomentAnalyzer:
                 "--playlist-end",
                 str(max(1, max_items)),
                 "--dump-single-json",
+                *yt_args,
                 tab_url,
             ]
             try:
