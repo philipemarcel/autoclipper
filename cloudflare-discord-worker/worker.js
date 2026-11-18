@@ -46,7 +46,8 @@ const ACTION_LABELS = {
   approve_both: "✅ Aprovado! Enviando para a Fila Espaçada (Instagram Reels + TikTok)...",
   now_both: "⚡ Fura-fila acionado! Publicando AGORA no Reels + TikTok...",
   approve_reels: "📸 Aprovado para a Fila Espaçada (Somente Instagram Reels)...",
-  approve_tiktok: "🎵 Aprovado para a Fila Espaçada (Somente TikTok)...",
+  approve_tiktok: "🎵 Aprovado! Enviando para a Fila Espaçada do TikTok...",
+  now_tiktok: "⚡ Fura-fila acionado! Enviando AGORA para o TikTok...",
   clean_audio: "🔇 Isolando voz e removendo música de fundo com IA (Demucs)... Um novo preview chegará em instantes!",
   reject: "🗑️ Corte descartado.",
 };

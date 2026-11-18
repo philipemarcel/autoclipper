@@ -82,7 +82,13 @@ class DiscordNotifier:
             "footer": {"text": f"ID: {cut.cut_id} • Fonte: {cut.source_type}"},
         }
 
-        components = self._build_action_rows(cut.cut_id, drip_min, audio_cleaned=cut.audio_cleaned)
+        components = self._build_action_rows(
+            cut.cut_id,
+            drip_min,
+            audio_cleaned=cut.audio_cleaned,
+            ig_enabled=self.profile.publishing.instagram.enabled,
+            tt_enabled=self.profile.publishing.tiktok.enabled,
+        )
         payload_json = {
             "content": f"**Novo corte pronto de `{self.profile.display_name}`!** Assista à prévia abaixo e aprove com 1 clique:",
             "embeds": [embed],
@@ -117,37 +123,71 @@ class DiscordNotifier:
             logger.warning("Falha ao enviar status no Discord: %s", resp.text)
 
     @staticmethod
-    def _build_action_rows(cut_id: str, drip_min: int, audio_cleaned: bool = False) -> List[Dict[str, Any]]:
-        row1_buttons = [
-            {
-                "type": 2,
-                "style": 3,  # Success (Verde)
-                "label": f"Aprovar (Fila {drip_min}m)",
-                "emoji": {"name": "✅"},
-                "custom_id": f"approve_both:{cut_id}",
-            },
-            {
-                "type": 2,
-                "style": 1,  # Primary (Azul)
-                "label": "Postar Agora",
-                "emoji": {"name": "⚡"},
-                "custom_id": f"now_both:{cut_id}",
-            },
-            {
-                "type": 2,
-                "style": 2,  # Secondary (Cinza)
-                "label": "Só Reels",
-                "emoji": {"name": "📸"},
-                "custom_id": f"approve_reels:{cut_id}",
-            },
-            {
-                "type": 2,
-                "style": 2,
-                "label": "Só TikTok",
-                "emoji": {"name": "🎵"},
-                "custom_id": f"approve_tiktok:{cut_id}",
-            },
-        ]
+    def _build_action_rows(
+        cut_id: str,
+        drip_min: int,
+        audio_cleaned: bool = False,
+        ig_enabled: bool = True,
+        tt_enabled: bool = True,
+    ) -> List[Dict[str, Any]]:
+        if ig_enabled and tt_enabled:
+            row1_buttons = [
+                {
+                    "type": 2,
+                    "style": 3,
+                    "label": f"Aprovar (Fila {drip_min}m)",
+                    "emoji": {"name": "✅"},
+                    "custom_id": f"approve_both:{cut_id}",
+                },
+                {
+                    "type": 2,
+                    "style": 1,
+                    "label": "Postar Agora",
+                    "emoji": {"name": "⚡"},
+                    "custom_id": f"now_both:{cut_id}",
+                },
+                {
+                    "type": 2,
+                    "style": 2,
+                    "label": "Só Reels",
+                    "emoji": {"name": "📸"},
+                    "custom_id": f"approve_reels:{cut_id}",
+                },
+                {
+                    "type": 2,
+                    "style": 2,
+                    "label": "Só TikTok",
+                    "emoji": {"name": "🎵"},
+                    "custom_id": f"approve_tiktok:{cut_id}",
+                },
+            ]
+        elif tt_enabled:
+            row1_buttons = [
+                {
+                    "type": 2,
+                    "style": 3,
+                    "label": f"Aprovar TikTok (Fila {drip_min}m)",
+                    "emoji": {"name": "🎵"},
+                    "custom_id": f"approve_tiktok:{cut_id}",
+                },
+                {
+                    "type": 2,
+                    "style": 1,
+                    "label": "Enviar TikTok Agora",
+                    "emoji": {"name": "⚡"},
+                    "custom_id": f"now_tiktok:{cut_id}",
+                },
+            ]
+        else:
+            row1_buttons = [
+                {
+                    "type": 2,
+                    "style": 3,
+                    "label": f"Aprovar Reels (Fila {drip_min}m)",
+                    "emoji": {"name": "📸"},
+                    "custom_id": f"approve_reels:{cut_id}",
+                }
+            ]
 
         row2_buttons: List[Dict[str, Any]] = []
         if not audio_cleaned:

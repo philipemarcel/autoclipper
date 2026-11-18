@@ -281,6 +281,7 @@ def cmd_discord_action(action: str, cut_id: str, discord_message_id: str = "") -
             "now_both": (["instagram", "tiktok"], True),
             "approve_reels": (["instagram"], False),
             "approve_tiktok": (["tiktok"], False),
+            "now_tiktok": (["tiktok"], True),
         }
         if action not in platform_map:
             raise ValueError(f"Ação desconhecida recebida do Discord: {action}")

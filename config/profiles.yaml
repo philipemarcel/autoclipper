@@ -66,7 +66,7 @@ profiles:
       timezone: "America/Sao_Paulo"
 
       instagram:
-        enabled: true
+        enabled: false
         account_id_env: "IG_ACCOUNT_ID"
         access_token_env: "IG_ACCESS_TOKEN"
 
