@@ -541,6 +541,7 @@ class DripScheduler:
                             local_master,
                             caption,
                             title_hint=str(cut_dict.get("teaser_headline") or ""),
+                            creator_name=str(cut_dict.get("creator_name") or ""),
                         )
                     else:
                         results["youtube_shorts"] = "skipped_unconfigured"

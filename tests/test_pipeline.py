@@ -1156,7 +1156,7 @@ def test_non_twitch_creator_name_does_not_leak_profile_alanzoka(tmp_path: Path, 
 
 def test_youtube_shorts_publisher_metadata_and_discord_buttons(tmp_path: Path, monkeypatch):
     from src.approval.discord_notifier import DiscordNotifier
-    from src.publisher.youtube_shorts import YouTubeShortsPublisher
+    from src.publisher.youtube_shorts import YouTubeShortsPublisher, compute_youtube_publish_at
 
     prof = _make_profile()
     prof.publishing.youtube_shorts.enabled = True
@@ -1171,23 +1171,47 @@ def test_youtube_shorts_publisher_metadata_and_discord_buttons(tmp_path: Path, m
     meta = yt_pub.build_video_metadata(
         caption="davy jones impressionado com golfinhos no gta 6\n\n#davyjones #gta6 #cortesdegames",
         title_hint="GOLFINHOS NO GTA 6",
+        creator_name="Davy Jones",
     )
     assert len(meta["snippet"]["title"]) <= 58
+    assert meta["snippet"]["title"].startswith("DAVY JONES IMPRESSIONADO COM")
+    assert meta["snippet"]["title"].count("#") == 1
     assert "#Shorts" in meta["snippet"]["title"]
+    assert "Palavras-chave:" in meta["snippet"]["description"]
     assert "#Shorts" in meta["snippet"]["description"]
     assert meta["snippet"]["categoryId"] == "20"
+    assert len(meta["snippet"]["tags"]) >= 8
     assert "davyjones" in meta["snippet"]["tags"]
     assert "Shorts" in meta["snippet"]["tags"]
     assert meta["status"]["privacyStatus"] == "public"
 
+    # Dica do vídeo: aguardar 25 min para processamento HD + evitar tarde (12h-18h BRT -> 19h+ BRT)
+    afternoon_utc = datetime(2026, 11, 19, 16, 10, 0, tzinfo=timezone.utc)  # 13:10 BRT
+    pub_at_afternoon = compute_youtube_publish_at(now_utc=afternoon_utc)
+    dt_brt = datetime.fromisoformat(pub_at_afternoon.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Sao_Paulo"))
+    assert dt_brt.hour >= 19
+
+    night_utc = datetime(2026, 11, 19, 23, 0, 0, tzinfo=timezone.utc)  # 20:00 BRT
+    pub_at_night = compute_youtube_publish_at(now_utc=night_utc)
+    dt_night = datetime.fromisoformat(pub_at_night.replace("Z", "+00:00"))
+    assert (dt_night - night_utc).total_seconds() >= 25 * 60
+
+    sched_meta = yt_pub.build_video_metadata(caption="clip #cortes", publish_at=pub_at_night)
+    assert sched_meta["status"]["privacyStatus"] == "private"
+    assert sched_meta["status"]["publishAt"] == pub_at_night
+
     long_meta = yt_pub.build_video_metadata(
         caption="essa frase propositalmente bem mais longa serve para testar o corte antes da truncagem mobile",
     )
-    assert len(long_meta["snippet"]["title"]) <= 59
+    assert len(long_meta["snippet"]["title"]) <= 58
     assert "#Shorts" in long_meta["snippet"]["description"]
 
-    # Mock resumable upload via Google API
+    # Mock resumable upload + thumbnail set via Google API
     uploaded = {}
+
+    class FakeExec:
+        def execute(self):
+            return {"items": []}
 
     class FakeInsertReq:
         def next_chunk(self):
@@ -1198,16 +1222,30 @@ def test_youtube_shorts_publisher_metadata_and_discord_buttons(tmp_path: Path, m
             uploaded["body"] = body
             return FakeInsertReq()
 
+    class FakeThumbnails:
+        def set(self, videoId=None, media_body=None):
+            uploaded["thumb_video_id"] = videoId
+            return FakeExec()
+
     class FakeService:
         def videos(self):
             return FakeVideos()
 
+        def thumbnails(self):
+            return FakeThumbnails()
+
+    thumb_dummy = tmp_path / "dummy.thumb.jpg"
+    thumb_dummy.write_bytes(b"\xff\xd8\xff")
+    monkeypatch.setattr("src.publisher.youtube_shorts.extract_striking_thumbnail", lambda vp, out: thumb_dummy)
     monkeypatch.setattr(yt_pub, "_build_youtube_service", lambda: FakeService())
     dummy_mp4 = tmp_path / "short.mp4"
     dummy_mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
-    url = yt_pub.publish_short(dummy_mp4, caption="clip brabo #cortes")
+    url = yt_pub.publish_short(dummy_mp4, caption="clip brabo #cortes", creator_name="Alanzoka")
     assert url == "https://youtube.com/shorts/ytShort123"
     assert uploaded["body"]["snippet"]["categoryId"] == "20"
+    assert uploaded["body"]["status"]["privacyStatus"] == "private"
+    assert "publishAt" in uploaded["body"]["status"]
+    assert uploaded["thumb_video_id"] == "ytShort123"
 
     # Discord Row 1 com Reels + TikTok + Shorts cabe perfeitamente nos 5 botões da API do Discord
     rows = DiscordNotifier._build_action_rows("cut_yt_1", drip_min=60, ig_enabled=True, tt_enabled=True, yt_enabled=True)
