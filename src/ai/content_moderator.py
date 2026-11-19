@@ -94,8 +94,36 @@ def _probe_duration(video_path: Path) -> float:
     return 30.0
 
 
+def _stitch_frames_grid_b64(jpg_paths: Sequence[Path]) -> Optional[str]:
+    """Assemble up to 6 frames into one 2x3 contact-sheet JPEG so 1 Groq Vision call stays well under 7k ITPM."""
+    if len(jpg_paths) < 2:
+        return None
+    try:
+        import cv2
+        import numpy as np
+
+        imgs = []
+        for p in jpg_paths[:6]:
+            im = cv2.imread(str(p))
+            if im is not None:
+                im = cv2.resize(im, (270, 480), interpolation=cv2.INTER_AREA)
+                imgs.append(im)
+        if len(imgs) < 2:
+            return None
+        while len(imgs) % 3 != 0:
+            imgs.append(np.zeros_like(imgs[0]))
+        rows = [np.hstack(imgs[i : i + 3]) for i in range(0, len(imgs), 3)]
+        grid = np.vstack(rows)
+        ok, buf = cv2.imencode(".jpg", grid, [cv2.IMWRITE_JPEG_QUALITY, 82])
+        if not ok:
+            return None
+        return base64.b64encode(buf.tobytes()).decode("ascii")
+    except Exception:
+        return None
+
+
 def extract_sample_frames_b64(video_path: Path, max_frames: int = 6) -> List[str]:
-    """Extract evenly spaced low-res JPEG frames as base64 strings for vision moderation."""
+    """Extract evenly spaced low-res JPEG frames (stitched into 1 contact sheet when possible) for vision moderation."""
     if not video_path.exists():
         return []
 
@@ -106,6 +134,7 @@ def extract_sample_frames_b64(video_path: Path, max_frames: int = 6) -> List[str
 
     with tempfile.TemporaryDirectory(prefix="mod_frames_") as tmpdir:
         tmp_path = Path(tmpdir)
+        jpg_paths: List[Path] = []
         for idx, ratio in enumerate(ratios):
             ts = max(0.0, min(duration - 0.1, duration * ratio))
             out_jpg = tmp_path / f"frame_{idx}.jpg"
@@ -119,15 +148,19 @@ def extract_sample_frames_b64(video_path: Path, max_frames: int = 6) -> List[str
                 "-frames:v",
                 "1",
                 "-vf",
-                "scale=360:-2",
+                "scale=270:-2",
                 "-q:v",
                 "6",
                 str(out_jpg),
             ]
             subprocess.run(cmd, capture_output=True, text=True, check=False)
             if out_jpg.exists() and out_jpg.stat().st_size > 0:
-                b64 = base64.b64encode(out_jpg.read_bytes()).decode("ascii")
-                frames_b64.append(b64)
+                jpg_paths.append(out_jpg)
+                frames_b64.append(base64.b64encode(out_jpg.read_bytes()).decode("ascii"))
+
+        stitched = _stitch_frames_grid_b64(jpg_paths)
+        if stitched:
+            return [stitched]
 
     return frames_b64
 
