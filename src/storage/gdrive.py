@@ -390,3 +390,49 @@ class DriveStore:
         else:
             meta = {"name": state_filename, "parents": [folder_ref]}
             self.service.files().create(body=meta, media_body=media).execute()
+
+    def recover_cut_metadata_by_id(self, cut_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Recupera `metadata.json` diretamente da pasta do corte no Google Drive caso duas
+        execuções paralelas tenham sobrescrito `processed_moments.json`.
+        """
+        clean_id = (cut_id or "").strip()
+        if not clean_id:
+            return None
+
+        if self.mode != "api":
+            if self.local_root and self.local_root.exists():
+                for meta_file in self.local_root.rglob("metadata.json"):
+                    if clean_id in meta_file.parent.name:
+                        try:
+                            return json.loads(meta_file.read_text(encoding="utf-8"))
+                        except Exception:
+                            pass
+            return None
+
+        try:
+            escaped = clean_id.replace("'", "\\'")
+            q = (
+                f"name contains '{escaped}' and "
+                "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            )
+            resp = self.service.files().list(q=q, fields="files(id, name)", pageSize=3).execute()
+            folders = resp.get("files") or []
+            for folder in folders:
+                meta_id = self._find_file_in_folder(folder["id"], "metadata.json")
+                if not meta_id:
+                    continue
+                from googleapiclient.http import MediaIoBaseDownload
+
+                buf = io.BytesIO()
+                req = self.service.files().get_media(fileId=meta_id)
+                downloader = MediaIoBaseDownload(buf, req)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+                raw = buf.getvalue().decode("utf-8").strip()
+                if raw:
+                    return json.loads(raw)
+        except Exception as exc:
+            logger.warning("Não foi possível recuperar metadata.json de `%s` no Drive: %s", clean_id, exc)
+        return None

@@ -223,10 +223,21 @@ def process_single_cluster(
         record.discord_message_id = msg_id
         meta_dict["discord_message_id"] = msg_id
 
-        # 9. Salva imediatamente no estado global para evitar duplicação
-        processed_state.setdefault("cuts", []).append(meta_dict)
+        # 9. Faz merge atômico com o estado mais recente do Drive para evitar que runs paralelos sobrescrevam cortes
+        latest_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
+        merged_by_id: Dict[str, Dict[str, Any]] = {}
+        for c in latest_state.get("cuts", []):
+            cid = str(c.get("cut_id") or "")
+            if cid:
+                merged_by_id[cid] = c
+        for c in processed_state.get("cuts", []):
+            cid = str(c.get("cut_id") or "")
+            if cid and cid not in merged_by_id:
+                merged_by_id[cid] = c
+        merged_by_id[record.cut_id] = meta_dict
+        processed_state["cuts"] = list(merged_by_id.values())
         store.save_state_json(PROCESSED_STATE_FILE, processed_state)
-        logger.info("Corte %s concluído e enviado para aprovação!", record.cut_id)
+        logger.info("Corte %s concluído e salvo no estado global!", record.cut_id)
         return record
     finally:
         shutil.rmtree(cut_work_dir, ignore_errors=True)
@@ -574,7 +585,14 @@ def cmd_discord_action(
 
     cut_dict = next((c for c in processed_state.get("cuts", []) if c.get("cut_id") == cut_id), None)
     if not cut_dict:
-        raise RuntimeError(f"Corte `{cut_id}` não encontrado em {PROCESSED_STATE_FILE}.")
+        recovered = store.recover_cut_metadata_by_id(cut_id)
+        if recovered:
+            processed_state.setdefault("cuts", []).append(recovered)
+            store.save_state_json(PROCESSED_STATE_FILE, processed_state)
+            cut_dict = recovered
+            logger.info("Corte `%s` recuperado automaticamente da pasta do Google Drive!", cut_id)
+        else:
+            raise RuntimeError(f"Corte `{cut_id}` não encontrado em {PROCESSED_STATE_FILE}.")
 
     profile = profiles.get(cut_dict["profile_id"]) or next(iter(profiles.values()), None)
     if not profile:

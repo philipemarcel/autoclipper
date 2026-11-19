@@ -281,6 +281,12 @@ class DripScheduler:
 
             prof = profiles_by_id.get(item["profile_id"])
             cut_dict = cuts_by_id.get(item["cut_id"])
+            if not cut_dict:
+                recovered = self.store.recover_cut_metadata_by_id(str(item.get("cut_id") or ""))
+                if recovered:
+                    cut_dict = recovered
+                    cuts_by_id[recovered["cut_id"]] = recovered
+                    processed_state.setdefault("cuts", []).append(recovered)
             if not prof or not cut_dict:
                 item["status"] = "skipped_missing"
                 changed = True
