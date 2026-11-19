@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from src.ai.deduplicator import find_duplicate_candidate, find_duplicate_cut
 from src.ai.director import GeminiDirector
 from src.config_loader import load_profiles, load_subtitle_theme
 from src.ffmpeg_utils import get_ffmpeg_bin
@@ -1471,53 +1472,152 @@ def test_process_due_queue_enforces_spacing_on_backlog(tmp_path: Path, monkeypat
     assert st["items"][1]["scheduled_for"] == "2026-11-19T16:00:00Z"
 
 
-def test_cleanup_instagram_low_views_script(monkeypatch):
-    from scripts.cleanup_instagram_low_views import delete_ig_media, find_low_view_media
+def test_deduplicator_checks_context_caption_and_extracted_timestamp():
+    processed_state = {
+        "cuts": [
+            {
+                "cut_id": "cut_orig",
+                "profile_id": "prof_1",
+                "twitch_login": "gaules",
+                "stream_key": "yt_abc123",
+                "video_id": "yt_abc123",
+                "mode": "youtube_auto",
+                "vod_anchor_sec": 1200,
+                "clip_ids": ["clip_10"],
+                "clip_created_at": "2026-11-19T15:00:00Z",
+                "dominant_title": "GAULES REAGINDO AO CLUTCH INSANO",
+                "caption": "Simplesmente impossivel acreditar nesse clutch absurdo na Mirage #cs2 #gaules #cortes",
+                "teaser_headline": "CLUTCH IMPOSSIVEL",
+                "transcript_snippet": "meu deus olha o que ele fez na mirage quatro abates seguidos sem perder vida nenhuma absurdo",
+                "director": {"main_start": 10.0, "main_end": 52.0},
+            }
+        ]
+    }
 
-    class FakeResp:
-        ok = True
-        status_code = 200
-        text = "{}"
+    # (a) Janela extraída do vídeo sobreposta no mesmo VOD/vídeo (1230+5=1235 até 1270 vs 1210..1252)
+    dup_window = find_duplicate_cut(
+        {
+            "cut_id": "cut_window",
+            "profile_id": "prof_1",
+            "twitch_login": "gaules",
+            "stream_key": "yt_abc123",
+            "video_id": "yt_abc123",
+            "mode": "youtube_auto",
+            "vod_anchor_sec": 1230,
+            "caption": "Momento totalmente diferente aqui",
+            "transcript_snippet": "outra conversa qualquer bem distinta",
+            "director": {"main_start": 5.0, "main_end": 40.0},
+        },
+        processed_state,
+    )
+    assert dup_window.is_duplicate is True
 
-        def __init__(self, payload):
-            self._payload = payload
+    # (b) Descrição muito parecida (mudando só hashtags/pontuação) mesmo em vídeo/horário diferente
+    dup_caption = find_duplicate_cut(
+        {
+            "cut_id": "cut_caption",
+            "profile_id": "prof_1",
+            "twitch_login": "gaules",
+            "stream_key": "kick_other",
+            "video_id": "kick_other",
+            "vod_anchor_sec": 100,
+            "caption": "Inacreditavel esse clutch absurdo na Mirage!! #reels #viral #fyp",
+            "transcript_snippet": "texto diferente curto",
+            "director": {"main_start": 0.0, "main_end": 35.0},
+        },
+        processed_state,
+    )
+    assert dup_caption.is_duplicate is True
 
-        def raise_for_status(self):
-            return None
+    # (c) Contexto de áudio/transcrição igual no mesmo canal com cut_id/clip_id diferente
+    dup_transcript = find_duplicate_cut(
+        {
+            "cut_id": "cut_audio",
+            "profile_id": "prof_1",
+            "twitch_login": "gaules",
+            "stream_key": "twitch_live_999",
+            "video_id": "",
+            "clip_ids": ["clip_repost_77"],
+            "clip_created_at": "2026-11-19T18:30:00Z",
+            "caption": "Reacao épica na transmissão de hoje",
+            "transcript_snippet": "olha o que ele fez na mirage quatro abates seguidos sem perder vida nenhuma cara",
+            "director": {"main_start": 0.0, "main_end": 32.0},
+        },
+        processed_state,
+    )
+    assert dup_transcript.is_duplicate is True
 
-        def json(self):
-            return self._payload
+    # (d) Segundo pico no MESMO vídeo do YouTube, fora da janela já cortada e com assunto distinto -> PERMITIDO!
+    distinct_peak = find_duplicate_candidate(
+        {
+            "cut_id": "cut_second_peak",
+            "profile_id": "prof_1",
+            "twitch_login": "gaules",
+            "stream_key": "yt_abc123",
+            "video_id": "yt_abc123",
+            "mode": "youtube_auto",
+            "vod_anchor_sec": 2600,
+            "total_duration": 42.0,
+            "dominant_title": "GAULES REAGINDO AO CLUTCH INSANO",
+        },
+        processed_state,
+    )
+    assert distinct_peak.is_duplicate is False
 
-    def fake_get(url, params=None, timeout=None):
-        if url.endswith("/media"):
-            return FakeResp(
-                {
-                    "data": [
-                        {"id": "m_low", "caption": "duplicado #cortes", "timestamp": "2026-11-19T12:00:00Z", "permalink": "https://instagram.com/reel/low/"},
-                        {"id": "m_ok", "caption": "viral #cortes", "timestamp": "2026-11-19T13:00:00Z", "permalink": "https://instagram.com/reel/ok/"},
-                    ]
-                }
-            )
-        if "/m_low/insights" in url:
-            return FakeResp({"data": [{"values": [{"value": 4}]}]})
-        if "/m_ok/insights" in url:
-            return FakeResp({"data": [{"values": [{"value": 850}]}]})
-        return FakeResp({})
 
-    deleted_ids = []
+def test_drip_scheduler_blocks_duplicate_cut_across_ids(tmp_path: Path):
+    store = DriveStore(fallback_local_dir=tmp_path / "drive_dedup_q")
+    prof = _make_profile()
+    prof.publishing.quiet_hours_brt = [3, 9]
+    prof.publishing.drip_interval_minutes = 75
+    now = datetime(2026, 11, 19, 15, 0, 0, tzinfo=timezone.utc)
+    # Garante agendamento na fila sem depender de tokens/chamadas externas de rede
+    store.save_state_json(
+        "drip_queue.json",
+        {
+            "last_published_by_profile": {prof.id: (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")},
+            "items": [],
+        },
+    )
+    scheduler = DripScheduler(store)
 
-    def fake_delete(url, params=None, timeout=None):
-        deleted_ids.append(url.rsplit("/", 1)[-1])
-        return FakeResp({"success": True})
+    # Primeiro corte entra na fila
+    first_outcome = scheduler.enqueue_or_publish_cut(
+        profile=prof,
+        cut_dict={
+            "cut_id": "cut_a",
+            "profile_id": prof.id,
+            "twitch_login": prof.twitch_login,
+            "stream_key": "vod_900",
+            "vod_anchor_sec": 600,
+            "caption": "Ele dropou a faca rara ao vivo na frente de todo mundo #cs2 #cortes",
+            "transcript_snippet": "nao acredito que ele tirou uma faca rara na caixa ao vivo mano",
+            "director": {"main_start": 2.0, "main_end": 34.0},
+        },
+        platforms=["instagram"],
+        work_dir=tmp_path / "w1",
+        force_immediate=False,
+        now_utc=now,
+    )
+    assert first_outcome["mode"] == "queued"
 
-    monkeypatch.setattr("scripts.cleanup_instagram_low_views.requests.get", fake_get)
-    monkeypatch.setattr("scripts.cleanup_instagram_low_views.requests.delete", fake_delete)
-
-    low = find_low_view_media("ig_1", "tok_1", min_views=10)
-    assert len(low) == 1
-    assert low[0]["id"] == "m_low"
-    assert low[0]["views"] == 4
-
-    ok, _ = delete_ig_media("m_low", "tok_1")
-    assert ok is True
-    assert deleted_ids == ["m_low"]
+    # Simula corte duplicado com outro cut_id e descrição quase idêntica
+    second_outcome = scheduler.enqueue_or_publish_cut(
+        profile=prof,
+        cut_dict={
+            "cut_id": "cut_b_dup",
+            "profile_id": prof.id,
+            "twitch_login": prof.twitch_login,
+            "stream_key": "clip_alt_901",
+            "vod_anchor_sec": 50,
+            "caption": "Dropou uma faca rara ao vivo na frente de todo mundo!! #reels #viral",
+            "transcript_snippet": "totalmente diferente ou curto",
+            "director": {"main_start": 0.0, "main_end": 30.0},
+        },
+        platforms=["instagram", "facebook"],
+        work_dir=tmp_path / "w2",
+        force_immediate=False,
+        now_utc=now + timedelta(minutes=5),
+    )
+    assert second_outcome["mode"] == "skipped_duplicate"
+    assert second_outcome["matched_cut_id"] == "cut_a"

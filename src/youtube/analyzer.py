@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from src.ai.deduplicator import find_duplicate_candidate
 from src.ffmpeg_utils import get_ffmpeg_bin
 from src.models import MomentCluster, ProfileConfig, TwitchClip
 from src.youtube.ytdlp_opts import get_ytdlp_youtube_args
@@ -270,11 +271,34 @@ class YouTubeMomentAnalyzer:
         ]
 
         clusters = []
+        accepted_records: List[Dict[str, Any]] = []
+        base_cuts = list((processed_state or {}).get("cuts", []))
         for w_start, w_end, w_score, w_label in windows:
             center = (w_start + w_end) // 2
             if not user_range and any(abs(center - ex) < 40 for ex in existing_anchors):
                 continue
             cid = self._make_cluster_id(video_id, f"sec_{w_start}")
+            cand_rec = {
+                "cut_id": cid,
+                "profile_id": self.profile.id,
+                "twitch_login": uploader,
+                "creator_name": uploader,
+                "stream_key": f"yt_{video_id}",
+                "video_id": f"yt_{video_id}",
+                "vod_anchor_sec": w_start,
+                "total_duration": float(max(20, w_end - w_start)),
+                "mode": "youtube_auto",
+                "dominant_title": w_label or title[:50],
+            }
+            if not user_range:
+                dup = find_duplicate_candidate(
+                    cand_rec,
+                    {"cuts": base_cuts + accepted_records},
+                    anchor_proximity_sec=45.0,
+                )
+                if dup.is_duplicate:
+                    continue
+            accepted_records.append(cand_rec)
             clusters.append(
                 self._build_cluster(
                     cluster_id=cid,

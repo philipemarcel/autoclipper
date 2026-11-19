@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from src.ai.deduplicator import find_duplicate_candidate
 from src.models import MomentCluster, ProfileConfig, TwitchClip
 from src.youtube.analyzer import parse_time_range
 
@@ -170,6 +171,8 @@ class KickMomentAnalyzer:
         eligible_clips.sort(key=lambda pair: pair[0], reverse=True)
         fallback_offline_clips.sort(key=lambda pair: pair[0], reverse=True)
         chosen_clips = eligible_clips or (fallback_offline_clips if not is_live else [])
+        accepted_records: List[Dict[str, Any]] = []
+        base_cuts = list((processed_state or {}).get("cuts", []))
         for rank_score, clip in chosen_clips:
             cid = str(clip.get("id") or "").strip()
             dur = float(clip.get("duration") or 0.0)
@@ -182,6 +185,24 @@ class KickMomentAnalyzer:
             vod_obj = clip.get("vod") or {}
             vod_uuid = str(vod_obj.get("id") or f"kick_{slug}")
             title = str(clip.get("title") or f"Clipe de {display_name}")
+            cand_rec = {
+                "cut_id": self._make_cluster_id(slug, f"clip_{cid}"),
+                "profile_id": self.profile.id,
+                "twitch_login": slug,
+                "creator_name": display_name,
+                "stream_key": f"kick_{slug}_{vod_uuid}",
+                "mode": "kick_clip",
+                "clip_ids": [cid],
+                "clip_urls": [page_url],
+                "clip_created_at": str(clip.get("created_at") or ""),
+                "dominant_title": title,
+            }
+            dup = find_duplicate_candidate(cand_rec, {"cuts": base_cuts + accepted_records})
+            if dup.is_duplicate:
+                logger.info("Clipe Kick %s ignorado (duplicata de %s): %s", cid, dup.matched_cut_id or "anterior", dup.reason)
+                continue
+
+            accepted_records.append(cand_rec)
             clusters.append(
                 self._build_clip_cluster(
                     slug=slug,
@@ -252,6 +273,20 @@ class KickMomentAnalyzer:
             w1 = min(int(dur_sec), w0 + 60)
             cid = self._make_cluster_id(slug, f"vod_{vod_id}_{w0}")
             title = str(v.get("session_title") or f"Live Kick {display_name}")
+            vod_cand = {
+                "cut_id": cid,
+                "profile_id": self.profile.id,
+                "twitch_login": slug,
+                "creator_name": display_name,
+                "stream_key": s_key,
+                "video_id": vod_id,
+                "vod_anchor_sec": w0,
+                "total_duration": float(max(20, w1 - w0)),
+                "mode": "kick_vod",
+                "dominant_title": title,
+            }
+            if find_duplicate_candidate(vod_cand, processed_state).is_duplicate:
+                continue
             clusters.append(
                 self._build_vod_or_live_cluster(
                     cluster_id=cid,

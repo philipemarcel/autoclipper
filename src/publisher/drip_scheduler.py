@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from src.ai.deduplicator import find_duplicate_cut
 from src.models import ProfileConfig
 from src.publisher.facebook_reels import FacebookReelsPublisher
 from src.publisher.instagram_reels import InstagramReelsPublisher
@@ -24,6 +25,27 @@ def _parse_iso(ts: str) -> datetime:
         cleaned = cleaned[:-1] + "+00:00"
     dt = datetime.fromisoformat(cleaned)
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+_DEDUP_ITEM_KEYS = (
+    "caption",
+    "teaser_headline",
+    "twitch_login",
+    "creator_name",
+    "stream_key",
+    "video_id",
+    "vod_anchor_sec",
+    "clip_ids",
+    "clip_created_at",
+    "dominant_title",
+    "transcript_snippet",
+    "director",
+    "mode",
+)
+
+
+def _dedup_fields_for_item(cut_dict: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: cut_dict[k] for k in _DEDUP_ITEM_KEYS if k in cut_dict and cut_dict[k] not in (None, "", [], {})}
 
 
 def _to_iso_utc(dt: datetime) -> str:
@@ -244,6 +266,26 @@ class DripScheduler:
         if not clean_platforms:
             return {"mode": "already_published", "platforms": []}
 
+        # Bloqueia cut_id novo cujo conteúdo/descrição/horário extraído duplique item já na fila ou publicado
+        same_cut_exists = any(it.get("cut_id") == cut_dict.get("cut_id") for it in state.get("items", []))
+        if not same_cut_exists:
+            dup = find_duplicate_cut(cut_dict, processed_state=None, queue_state=state)
+            if dup.is_duplicate:
+                logger.warning(
+                    "Bloqueando enfileiramento/publicação de %s (duplicata de %s): %s",
+                    cut_dict.get("cut_id"),
+                    dup.matched_cut_id or "item na fila",
+                    dup.reason,
+                )
+                return {
+                    "mode": "skipped_duplicate",
+                    "matched_cut_id": dup.matched_cut_id,
+                    "reason": dup.reason,
+                    "score": round(dup.score, 3),
+                }
+
+        dedup_meta = _dedup_fields_for_item(cut_dict)
+
         # Evita duplicar o mesmo cut_id pendente na fila
         existing = [
             it for it in state.get("items", []) if it.get("cut_id") == cut_dict["cut_id"] and it.get("status") == "pending"
@@ -276,6 +318,22 @@ class DripScheduler:
                         "retry_count": 1,
                         "discord_message_id": cut_dict.get("discord_message_id", ""),
                         "created_at": _to_iso_utc(now),
+                        **dedup_meta,
+                    }
+                )
+            elif result:
+                state.setdefault("items", []).append(
+                    {
+                        "cut_id": cut_dict["cut_id"],
+                        "profile_id": profile.id,
+                        "platforms": clean_platforms,
+                        "scheduled_for": _to_iso_utc(now),
+                        "published_at": _to_iso_utc(now),
+                        "status": "published",
+                        "results": result,
+                        "discord_message_id": cut_dict.get("discord_message_id", ""),
+                        "created_at": _to_iso_utc(now),
+                        **dedup_meta,
                     }
                 )
             self._save_queue_state(state)
@@ -303,6 +361,22 @@ class DripScheduler:
                         "retry_count": 1,
                         "discord_message_id": cut_dict.get("discord_message_id", ""),
                         "created_at": _to_iso_utc(now),
+                        **dedup_meta,
+                    }
+                )
+            elif result:
+                state.setdefault("items", []).append(
+                    {
+                        "cut_id": cut_dict["cut_id"],
+                        "profile_id": profile.id,
+                        "platforms": clean_platforms,
+                        "scheduled_for": _to_iso_utc(now),
+                        "published_at": _to_iso_utc(now),
+                        "status": "published",
+                        "results": result,
+                        "discord_message_id": cut_dict.get("discord_message_id", ""),
+                        "created_at": _to_iso_utc(now),
+                        **dedup_meta,
                     }
                 )
             self._save_queue_state(state)
@@ -316,6 +390,7 @@ class DripScheduler:
             "status": "pending",
             "discord_message_id": cut_dict.get("discord_message_id", ""),
             "created_at": _to_iso_utc(now),
+            **dedup_meta,
         }
         state.setdefault("items", []).append(item)
         self._save_queue_state(state)

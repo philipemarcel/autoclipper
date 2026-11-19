@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from src.ai.audio_cleaner import AudioCleaner
 from src.ai.content_moderator import moderate_video_for_platforms
+from src.ai.deduplicator import find_duplicate_candidate, find_duplicate_cut
 from src.ai.director import GeminiDirector
 from src.ai.transcriber import WordTranscriber
 from src.approval.discord_notifier import DiscordNotifier
@@ -48,6 +49,24 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _merge_processed_state_for_dedup(store: DriveStore, processed_state: Dict[str, Any]) -> Dict[str, Any]:
+    """Combina estado em memória e último JSON do Drive para detectar duplicatas entre runs."""
+    latest = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
+    merged: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for src_state in (latest, processed_state):
+        for cut in (src_state or {}).get("cuts", []):
+            if not isinstance(cut, dict):
+                continue
+            cid = str(cut.get("cut_id") or "").strip()
+            if cid and cid in seen_ids:
+                continue
+            if cid:
+                seen_ids.add(cid)
+            merged.append(cut)
+    return {"cuts": merged}
+
+
 def process_single_cluster(
     profile: ProfileConfig,
     cluster: MomentCluster,
@@ -55,11 +74,40 @@ def process_single_cluster(
     subtitle_theme: Dict[str, Any],
     processed_state: Dict[str, Any],
     work_root: Path,
-) -> CutRecord:
+) -> Optional[CutRecord]:
     cut_work_dir = work_root / cluster.cluster_id
     cut_work_dir.mkdir(parents=True, exist_ok=True)
+    creator_slug = cluster.broadcaster_login or profile.twitch_login or profile.id
+    creator_display = str(cluster.best_clip.broadcaster_name or creator_slug or profile.display_name).strip()
 
     try:
+        # 0.5. Pré-checagem anti-duplicação (clip_id, horário extraído no vídeo e contexto do título)
+        pre_candidate = {
+            "cut_id": cluster.cluster_id,
+            "profile_id": profile.id,
+            "twitch_login": creator_slug,
+            "creator_name": creator_display,
+            "stream_key": cluster.stream_or_vod_key,
+            "mode": cluster.mode,
+            "video_id": cluster.video_id,
+            "vod_anchor_sec": cluster.peak_offset,
+            "clip_ids": [c.id for c in cluster.clips],
+            "clip_urls": [c.url for c in cluster.clips[:5]],
+            "clip_created_at": cluster.best_clip.created_at or "",
+            "dominant_title": str(cluster.dominant_title or "").strip(),
+        }
+        dedup_processed = _merge_processed_state_for_dedup(store, processed_state)
+        dedup_queue = store.load_state_json("drip_queue.json", default={"items": []})
+        pre_dup = find_duplicate_candidate(pre_candidate, dedup_processed, queue_state=dedup_queue)
+        if pre_dup.is_duplicate:
+            logger.info(
+                "Corte %s pulado antes do download (duplicata de %s): %s",
+                cluster.cluster_id,
+                pre_dup.matched_cut_id or "corte anterior",
+                pre_dup.reason,
+            )
+            return None
+
         # 1. Download da mídia bruta (YouTube, Kick OU Twitch VOD/Clipe)
         if cluster.mode.startswith("youtube"):
             raw_media = YouTubeDownloader().download_moment(cluster, cut_work_dir)
@@ -81,6 +129,34 @@ def process_single_cluster(
             raw_duration_sec=raw_media.duration_sec,
             peak_hint_sec=raw_media.peak_Hint_sec_in_file,
         )
+
+        # 3.5. Barreira anti-duplicação semântica + temporal antes de renderizar/subir (contexto falado, descrição e janela extraída)
+        cut_transcript = " ".join(
+            w.word for w in words if (decision.main_start - 0.5) <= w.start <= (decision.main_end + 0.5)
+        ).strip()
+        transcript_snippet = cut_transcript[:600]
+        post_candidate = {
+            **pre_candidate,
+            "caption": decision.full_social_copy,
+            "teaser_headline": decision.teaser_headline,
+            "total_duration": round(decision.total_duration, 2),
+            "director": {
+                "main_start": decision.main_start,
+                "main_end": decision.main_end,
+            },
+            "transcript_snippet": transcript_snippet,
+        }
+        latest_processed = _merge_processed_state_for_dedup(store, processed_state)
+        latest_queue = store.load_state_json("drip_queue.json", default={"items": []})
+        post_dup = find_duplicate_cut(post_candidate, latest_processed, queue_state=latest_queue)
+        if post_dup.is_duplicate:
+            logger.info(
+                "Corte %s pulado após transcrição/descrição (duplicata de %s): %s",
+                cluster.cluster_id,
+                post_dup.matched_cut_id or "corte anterior",
+                post_dup.reason,
+            )
+            return None
 
         # 4. Auto-Layout 9:16 inteligente (Split-Screen / Face-Tracking / Fundo Blur)
         analyzer = LayoutAnalyzer(profile.editing)
@@ -115,8 +191,6 @@ def process_single_cluster(
         copy_path = cut_work_dir / "copy.txt"
         copy_path.write_text(decision.full_social_copy, encoding="utf-8")
 
-        creator_slug = cluster.broadcaster_login or profile.twitch_login or profile.id
-        creator_display = str(cluster.best_clip.broadcaster_name or creator_slug or profile.display_name).strip()
         date_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         stream_folder = f"{date_prefix}_{cluster.stream_or_vod_key}"
         anchor_label = f"vod{cluster.peak_offset}s" if cluster.peak_offset is not None else "clip"
@@ -172,6 +246,8 @@ def process_single_cluster(
         meta_dict["clip_ids"] = [c.id for c in cluster.clips]
         if cluster.best_clip.created_at:
             meta_dict["clip_created_at"] = cluster.best_clip.created_at
+        meta_dict["dominant_title"] = str(cluster.dominant_title or "").strip()
+        meta_dict["transcript_snippet"] = transcript_snippet
 
         # 7.5. Moderação automática visual + áudio por plataforma (Instagram vs YouTube Shorts vs TikTok vs Facebook)
         enabled_platforms: List[str] = []
@@ -184,9 +260,6 @@ def process_single_cluster(
         if profile.publishing.tiktok.enabled:
             enabled_platforms.append("tiktok")
 
-        cut_transcript = " ".join(
-            w.word for w in words if (decision.main_start - 0.5) <= w.start <= (decision.main_end + 0.5)
-        )
         moderation = moderate_video_for_platforms(
             video_path=rendered.master_mp4,
             requested_platforms=enabled_platforms,
@@ -308,8 +381,9 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
 
             for cluster in candidates:
                 try:
-                    process_single_cluster(prof, cluster, store, theme, processed_state, work_root)
-                    total_created += 1
+                    created_rec = process_single_cluster(prof, cluster, store, theme, processed_state, work_root)
+                    if created_rec is not None:
+                        total_created += 1
                 except Exception as exc:
                     logger.exception("Erro ao processar cluster %s: %s", cluster.cluster_id, exc)
 
@@ -343,11 +417,12 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
                             max_age_hours=prof.detection.recap_hours,
                         )
                         for ytc in yt_clusters:
-                            process_single_cluster(prof, ytc, store, theme, processed_state, work_root)
-                            total_created += 1
-                            yt_created += 1
-                            channel_done = True
-                            break
+                            created_rec = process_single_cluster(prof, ytc, store, theme, processed_state, work_root)
+                            if created_rec is not None:
+                                total_created += 1
+                                yt_created += 1
+                                channel_done = True
+                                break
                     except Exception as exc:
                         logger.warning("Aviso ao monitorar vídeo YouTube %s: %s", v_url, exc)
 
@@ -366,10 +441,11 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
                         processed_state=processed_state,
                     )
                     for kc in k_clusters:
-                        process_single_cluster(prof, kc, store, theme, processed_state, work_root)
-                        total_created += 1
-                        kick_created += 1
-                        break
+                        created_rec = process_single_cluster(prof, kc, store, theme, processed_state, work_root)
+                        if created_rec is not None:
+                            total_created += 1
+                            kick_created += 1
+                            break
                 except Exception as exc:
                     logger.warning("Aviso ao monitorar canal Kick %s: %s", k_ref, exc)
 
@@ -457,8 +533,9 @@ def cmd_kick(
     created = 0
     for cluster in clusters:
         try:
-            process_single_cluster(profile, cluster, store, theme, processed_state, work_root)
-            created += 1
+            created_rec = process_single_cluster(profile, cluster, store, theme, processed_state, work_root)
+            if created_rec is not None:
+                created += 1
         except Exception as exc:
             logger.exception("Erro ao gerar corte da Kick (%s): %s", cluster.cluster_id, exc)
             notifier.post_status_reply("", f"❌ Erro ao processar trecho da Kick <{url}>: `{exc}`")
@@ -519,8 +596,9 @@ def cmd_youtube(
     created = 0
     for cluster in clusters:
         try:
-            process_single_cluster(profile, cluster, store, theme, processed_state, work_root)
-            created += 1
+            created_rec = process_single_cluster(profile, cluster, store, theme, processed_state, work_root)
+            if created_rec is not None:
+                created += 1
         except Exception as exc:
             logger.exception("Erro ao gerar corte do YouTube (%s): %s", cluster.cluster_id, exc)
             notifier.post_status_reply(

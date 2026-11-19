@@ -6,6 +6,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.ai.deduplicator import find_duplicate_candidate
 from src.models import MomentCluster, ProfileConfig, TwitchClip
 from src.twitch.client import TwitchHelixClient, parse_twitch_duration_seconds
 
@@ -354,6 +355,7 @@ class MomentDetector:
         }
 
         accepted: List[MomentCluster] = []
+        accepted_records: List[Dict[str, Any]] = []
         for cluster in clusters:
             if len(accepted) >= remaining_slots:
                 break
@@ -378,7 +380,37 @@ class MomentDetector:
                 if overlaps_existing or overlaps_accepted:
                     continue
 
+            # 3. Verificação multi-sinal (contexto de título/clipe + horário/janela extraída)
+            cand_rec = {
+                "cut_id": cluster.cluster_id,
+                "profile_id": self.profile.id,
+                "twitch_login": cluster.broadcaster_login or self.profile.twitch_login,
+                "creator_name": str(cluster.best_clip.broadcaster_name or self.profile.display_name),
+                "stream_key": cluster.stream_or_vod_key,
+                "video_id": cluster.video_id,
+                "vod_anchor_sec": cluster.peak_offset,
+                "clip_ids": [c.id for c in cluster.clips],
+                "clip_urls": [c.url for c in cluster.clips[:5]],
+                "clip_created_at": cluster.best_clip.created_at or "",
+                "dominant_title": str(cluster.dominant_title or ""),
+                "mode": cluster.mode,
+            }
+            dup = find_duplicate_candidate(
+                cand_rec,
+                {"cuts": existing_records + accepted_records},
+                anchor_proximity_sec=float(self.cfg.dedup_overlap_seconds),
+            )
+            if dup.is_duplicate:
+                logger.info(
+                    "Cluster Twitch %s ignorado (duplicata de %s): %s",
+                    cluster.cluster_id,
+                    dup.matched_cut_id or "anterior",
+                    dup.reason,
+                )
+                continue
+
             accepted.append(cluster)
+            accepted_records.append(cand_rec)
 
         return accepted
 
