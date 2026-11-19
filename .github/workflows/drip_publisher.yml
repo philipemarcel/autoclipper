@@ -10,6 +10,10 @@ on:
         description: "Forçar publicação imediata do próximo corte pendente (true/false)"
         required: false
         default: "false"
+      platform:
+        description: "Rede social específica (instagram, facebook, youtube, tiktok) ou vazio para todas"
+        required: false
+        default: ""
 
 concurrency:
   group: drip-publisher-loop
@@ -59,5 +63,8 @@ jobs:
           ARGS=("drip-publish")
           if [ "${{ inputs.force_immediate }}" = "true" ]; then
             ARGS+=("--force")
+          fi
+          if [ -n "${{ inputs.platform }}" ]; then
+            ARGS+=("--platform" "${{ inputs.platform }}")
           fi
           python -m src.main "${ARGS[@]}"

@@ -53,6 +53,7 @@ class InstagramPublishConfig:
     access_token_env: str = "IG_ACCESS_TOKEN"
     share_to_feed: bool = True
     trial_mode: str = ""  # "" | "SS_PERFORMANCE" | "MANUAL"
+    drip_interval_minutes: Optional[int] = None
 
 
 @dataclass
@@ -62,6 +63,7 @@ class TikTokPublishConfig:
     privacy_level: str = "PUBLIC_TO_EVERYONE"  # SELF_ONLY | PUBLIC_TO_EVERYONE | MUTUAL_FOLLOW_FRIENDS | FOLLOWER_OF_CREATOR
     fallback_to_inbox: bool = True
     access_token_env: str = "TIKTOK_ACCESS_TOKEN"
+    drip_interval_minutes: Optional[int] = None
 
 
 @dataclass
@@ -70,6 +72,7 @@ class YouTubeShortsPublishConfig:
     privacy_status: str = "public"  # public | unlisted | private
     category_id: str = "20"  # 20 = Gaming
     token_json_env: str = "YOUTUBE_TOKEN_JSON"
+    drip_interval_minutes: Optional[int] = None
 
 
 @dataclass
@@ -77,6 +80,7 @@ class FacebookPublishConfig:
     enabled: bool = True
     page_id_env: str = "FB_PAGE_ID"
     access_token_env: str = "FB_ACCESS_TOKEN"
+    drip_interval_minutes: Optional[int] = None
 
 
 @dataclass

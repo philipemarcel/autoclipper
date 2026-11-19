@@ -126,12 +126,33 @@ class DiscordNotifier:
             blocked_labels = ", ".join(plat_names.get(p, p) for p in blocked)
 
             if allowed and auto_queue_outcome:
+                by_plat = auto_queue_outcome.get("by_platform") or {}
                 if mode == "published_now":
                     queue_line = f"⚡ **JÁ PUBLICADO AUTOMATICAMENTE AGORA** em: `{allowed_labels}`"
                     auto_status_header = f"✅ **JÁ PUBLICADO AUTOMATICAMENTE** ({allowed_labels}) — aprovado sem conteúdo impróprio!"
+                elif mode == "mixed" and by_plat:
+                    per_net = []
+                    for p, info in by_plat.items():
+                        p_label = plat_names.get(p, p)
+                        if info.get("mode") == "published_now":
+                            per_net.append(f"{p_label}: ⚡ agora")
+                        elif info.get("mode") in ("queued", "failed_retry"):
+                            per_net.append(f"{p_label}: ⏰ {info.get('scheduled_local', '')}")
+                    detail_str = " | ".join(per_net)
+                    queue_line = f"✅ **FILAS INDEPENDENTES ATUALIZADAS**: {detail_str}"
+                    auto_status_header = f"✅ **PROCESSADO NAS FILAS SEPARADAS** ({detail_str})!"
                 else:
                     when_str = f" para `{sched_local}`" if sched_local else ""
-                    queue_line = f"✅ **JÁ FOI AUTOMATICAMENTE PARA A FILA**{when_str} em: `{allowed_labels}`"
+                    if by_plat:
+                        per_net = [
+                            f"{plat_names.get(p, p)}: {info.get('scheduled_local', sched_local)}"
+                            for p, info in by_plat.items()
+                            if info.get("scheduled_local")
+                        ]
+                        detail_str = " | ".join(per_net)
+                        queue_line = f"✅ **NA FILA SEPARADA DE CADA REDE**: {detail_str}" if detail_str else f"✅ **JÁ FOI AUTOMATICAMENTE PARA A FILA**{when_str} em: `{allowed_labels}`"
+                    else:
+                        queue_line = f"✅ **JÁ FOI AUTOMATICAMENTE PARA A FILA**{when_str} em: `{allowed_labels}`"
                     auto_status_header = f"✅ **JÁ ENTROU AUTOMATICAMENTE NA FILA**{when_str} ({allowed_labels}) por não apresentar conteúdo impróprio!"
 
                 if blocked:

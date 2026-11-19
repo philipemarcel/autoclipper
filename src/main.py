@@ -754,22 +754,42 @@ def cmd_discord_action(
             store.save_state_json(PROCESSED_STATE_FILE, processed_state)
             notifier.post_status_reply(
                 msg_ref,
-                f"🚀 **Publicado no ar agora!** (`{cut_id}`) → `{json.dumps(outcome['results'], ensure_ascii=False)}`",
+                f"🚀 **Publicado no ar agora!** (`{cut_id}`) → `{json.dumps(outcome.get('results', {}), ensure_ascii=False)}`",
             )
-        elif outcome["mode"] == "queued":
+        elif outcome["mode"] in ("queued", "mixed"):
             cut_dict["status"] = "queued"
             store.save_state_json(PROCESSED_STATE_FILE, processed_state)
-            notifier.post_status_reply(
-                msg_ref,
-                f"⏰ **Na Fila Espaçada!** (`{cut_id}`) sairá automaticamente em **{outcome['scheduled_local']} BRT** ({', '.join(platforms)}).",
-            )
+            by_plat = outcome.get("by_platform") or {}
+            if by_plat:
+                parts = []
+                for p, info in by_plat.items():
+                    if info.get("mode") == "published_now":
+                        parts.append(f"`{p}`: 🚀 publicado agora")
+                    elif info.get("mode") in ("queued", "failed_retry"):
+                        parts.append(f"`{p}`: ⏰ {info.get('scheduled_local', '')} BRT")
+                    elif info.get("mode") == "already_queued":
+                        parts.append(f"`{p}`: ℹ️ já na fila")
+                summary = " • ".join(parts)
+                notifier.post_status_reply(
+                    msg_ref,
+                    f"⏰ **Filas por Rede Atualizadas!** (`{cut_id}`) → {summary}",
+                )
+            else:
+                notifier.post_status_reply(
+                    msg_ref,
+                    f"⏰ **Na Fila Espaçada!** (`{cut_id}`) sairá automaticamente em **{outcome['scheduled_local']} BRT** ({', '.join(platforms)}).",
+                )
+        elif outcome["mode"] == "already_published":
+            notifier.post_status_reply(msg_ref, f"ℹ️ Corte `{cut_id}` já foi publicado nessas redes.")
+        elif outcome["mode"] == "skipped_duplicate":
+            notifier.post_status_reply(msg_ref, f"⚠️ Corte `{cut_id}` bloqueado por duplicidade: `{outcome.get('reason', '')}`.")
         else:
             notifier.post_status_reply(msg_ref, f"ℹ️ Corte `{cut_id}` já estava agendado na fila.")
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def cmd_drip_publish(force_next: bool = False) -> int:
+def cmd_drip_publish(force_next: bool = False, platform: str = "") -> int:
     if _is_unconfigured_ci():
         logger.info("Aguardando configuração inicial (`/setup iniciar` ou GDRIVE_TOKEN_JSON nos Secrets).")
         return 0
@@ -780,7 +800,13 @@ def cmd_drip_publish(force_next: bool = False) -> int:
 
     try:
         scheduler = DripScheduler(store)
-        reports = scheduler.process_due_queue(profiles, processed_state, work_dir, force_next=force_next)
+        reports = scheduler.process_due_queue(
+            profiles,
+            processed_state,
+            work_dir,
+            force_next=force_next,
+            platform_filter=platform or None,
+        )
         if reports or any(c.get("_dirty_moderation") for c in processed_state.get("cuts", [])):
             for c in processed_state.get("cuts", []):
                 c.pop("_dirty_moderation", None)
@@ -789,9 +815,10 @@ def cmd_drip_publish(force_next: bool = False) -> int:
                 cut = rep["cut"]
                 prof = profiles.get(cut["profile_id"])
                 if prof:
+                    plat_tag = f" ({rep['platform']})" if rep.get("platform") else ""
                     DiscordNotifier(prof).post_status_reply(
                         str(cut.get("discord_message_id", "")),
-                        f"✅ **Fila Espaçada disparada!** Corte `{cut['cut_id']}` publicado: `{json.dumps(rep['results'], ensure_ascii=False)}`",
+                        f"✅ **Fila Espaçada disparada{plat_tag}!** Corte `{cut['cut_id']}` publicado: `{json.dumps(rep['results'], ensure_ascii=False)}`",
                     )
         logger.info("Verificação da Fila Espaçada concluída: %d post(s) disparado(s).", len(reports))
         retention_days = max((int(p.publishing.drive_retention_days) for p in profiles.values()), default=10)
@@ -856,6 +883,7 @@ def build_cli() -> argparse.ArgumentParser:
 
     p_drip = sub.add_parser("drip-publish", help="Publica cortes vencidos na Fila Espaçada Inteligente.")
     p_drip.add_argument("--force", action="store_true", help="Publica imediatamente o próximo corte elegível da fila.")
+    p_drip.add_argument("--platform", type=str, default="", help="Filtrar fila por rede social (instagram, facebook, youtube, tiktok).")
 
     p_clean = sub.add_parser("cleanup", help="Remove do Google Drive vídeos mais antigos que N dias.")
     p_clean.add_argument("--days", type=int, default=None, help="Dias de retenção (padrão: config de profiles.yaml).")
@@ -899,7 +927,7 @@ def main() -> None:
             time_range=args.time_range,
         )
     elif args.command == "drip-publish":
-        cmd_drip_publish(force_next=bool(args.force))
+        cmd_drip_publish(force_next=bool(args.force), platform=str(args.platform or ""))
     elif args.command == "cleanup":
         cmd_cleanup(retention_days=args.days)
     elif args.command == "colab-loop":

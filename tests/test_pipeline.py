@@ -1349,16 +1349,18 @@ def test_resilient_per_platform_no_duplicate_on_partial_failure(tmp_path: Path, 
     scheduler = DripScheduler(store)
     scheduler.process_due_queue({prof.id: prof}, processed_state, tmp_path / "work", now_utc=now)
 
-    # IG and YT both succeeded, TikTok failed -> only tiktok left in platforms, IG/YT IDs preserved
+    # IG and YT both succeeded in their own queues; TikTok failed in its own queue -> independent items!
     st = store.load_state_json("drip_queue.json", {})
-    it = st["items"][0]
+    by_plat = {it["platform"]: it for it in st["items"]}
     assert ig_calls == 1
     assert yt_calls == 1
     assert tt_calls == 1
-    assert it["status"] == "pending"
-    assert it["platforms"] == ["tiktok"]
-    assert it["results"]["instagram_reel_id"] == "ig_media_111"
-    assert it["results"]["youtube_short_url"] == "https://youtube.com/shorts/yt111"
+    assert by_plat["instagram"]["status"] == "published"
+    assert by_plat["instagram"]["results"]["instagram_reel_id"] == "ig_media_111"
+    assert by_plat["youtube"]["status"] == "published"
+    assert by_plat["youtube"]["results"]["youtube_short_url"] == "https://youtube.com/shorts/yt111"
+    assert by_plat["tiktok"]["status"] == "pending"
+    assert by_plat["tiktok"]["platforms"] == ["tiktok"]
 
     # Retry run 2 hours later: IG and YT must NEVER be called again!
     later = now + timedelta(hours=2, minutes=5)
@@ -1368,8 +1370,9 @@ def test_resilient_per_platform_no_duplicate_on_partial_failure(tmp_path: Path, 
     assert yt_calls == 1
     assert tt_calls == 2
     st2 = store.load_state_json("drip_queue.json", {})
-    assert st2["items"][0]["status"] == "published"
-    assert st2["items"][0]["results"]["tiktok_publish_id"] == "tt_pub_111"
+    by_plat2 = {it["platform"]: it for it in st2["items"]}
+    assert by_plat2["tiktok"]["status"] == "published"
+    assert by_plat2["tiktok"]["results"]["tiktok_publish_id"] == "tt_pub_111"
 
 
 def test_facebook_reels_publisher_flow(tmp_path: Path, monkeypatch):
@@ -2051,3 +2054,225 @@ def test_drip_scheduler_publish_time_dedup_and_nudity_gate(tmp_path: Path, monke
     by_id = {it["cut_id"]: it for it in st["items"]}
     assert by_id["cut_pending_dup"]["status"] == "skipped_duplicate"
     assert by_id["cut_pending_nude"]["status"] == "blocked_nudity"
+
+
+def test_separate_queues_per_social_network_independence(tmp_path: Path, monkeypatch):
+    store = DriveStore(fallback_local_dir=tmp_path / "drive_sep_queues")
+    prof = _make_profile()
+    prof.publishing.drip_interval_minutes = 60
+    prof.publishing.quiet_hours_brt = [3, 9]
+    prof.publishing.instagram.enabled = True
+    prof.publishing.facebook.enabled = False
+    prof.publishing.tiktok.enabled = True
+    prof.publishing.youtube_shorts.enabled = True
+
+    mp4 = tmp_path / "sep.mp4"
+    mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    m1, _ = store.upload_file(mp4, ["cortes", "criador_01", "sep_1"], "master_1080p60.mp4")
+    m2, _ = store.upload_file(mp4, ["cortes", "criador_01", "sep_2"], "master_1080p60.mp4")
+
+    processed_state = {
+        "cuts": [
+            {"cut_id": "sep_1", "profile_id": prof.id, "caption": "primeiro momento epico #cs2", "master_file_id": m1},
+            {"cut_id": "sep_2", "profile_id": prof.id, "caption": "segundo momento engracado #lol", "master_file_id": m2},
+        ]
+    }
+
+    now = datetime(2026, 11, 19, 15, 0, 0, tzinfo=timezone.utc)
+    # Instagram já publicou há 10 min; TikTok e YouTube não publicaram recentemente
+    store.save_state_json(
+        "drip_queue.json",
+        {
+            "last_published_by_profile": {},
+            "last_published_by_platform": {
+                prof.id: {
+                    "instagram": (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+            },
+            "items": [],
+        },
+    )
+
+    tt_calls = []
+    ig_calls = []
+
+    class FakeIG:
+        is_ready = True
+        is_instagram_login_token = False
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def publish_reel(self, *a, **kw):
+            ig_calls.append(1)
+            return f"ig_{len(ig_calls)}"
+
+    class FakeTT:
+        is_ready = True
+        last_publish_mode = "direct"
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def publish_video(self, *a, **kw):
+            tt_calls.append(1)
+            return f"tt_{len(tt_calls)}"
+
+    monkeypatch.setattr("src.publisher.drip_scheduler.InstagramReelsPublisher", FakeIG)
+    monkeypatch.setattr("src.publisher.drip_scheduler.TikTokPublisher", FakeTT)
+
+    scheduler = DripScheduler(store)
+
+    # 1) Enfileira sep_1 para Instagram e TikTok: TikTok sai IMEDIATAMENTE, Instagram entra na fila (+50m)
+    out1 = scheduler.enqueue_or_publish_cut(
+        profile=prof,
+        cut_dict={**processed_state["cuts"][0], "moderation": {"vision_checked": True, "allowed_platforms": ["instagram", "tiktok"], "blocked_platforms": []}},
+        platforms=["instagram", "tiktok"],
+        work_dir=tmp_path / "w_sep1",
+        now_utc=now,
+    )
+    assert out1["mode"] == "mixed"
+    assert out1["by_platform"]["tiktok"]["mode"] == "published_now"
+    assert out1["by_platform"]["instagram"]["mode"] == "queued"
+    assert out1["by_platform"]["instagram"]["scheduled_for"] == "2026-11-19T15:50:00Z"
+    assert len(tt_calls) == 1
+    assert len(ig_calls) == 0
+
+    # 2) Enfileirar YouTube depois para o MESMO cut_id (sep_1) funciona sem dar already_queued!
+    out_yt = scheduler.enqueue_or_publish_cut(
+        profile=prof,
+        cut_dict={**processed_state["cuts"][0], "moderation": {"vision_checked": True, "allowed_platforms": ["instagram", "tiktok", "youtube_shorts"], "blocked_platforms": []}},
+        platforms=["youtube_shorts"],
+        work_dir=tmp_path / "w_sep1_yt",
+        now_utc=now + timedelta(minutes=1),
+    )
+    # YouTubeShortsPublisher não configurado -> skipped_unconfigured, marcado como published na fila do YouTube
+    assert out_yt["mode"] == "published_now"
+
+    # 3) Enfileira sep_2 para Instagram e TikTok -> cada fila calcula seu próprio slot independente
+    out2 = scheduler.enqueue_or_publish_cut(
+        profile=prof,
+        cut_dict={**processed_state["cuts"][1], "moderation": {"vision_checked": True, "allowed_platforms": ["instagram", "tiktok"], "blocked_platforms": []}},
+        platforms=["instagram", "tiktok"],
+        work_dir=tmp_path / "w_sep2",
+        now_utc=now + timedelta(minutes=5),
+    )
+    assert out2["mode"] == "queued"
+    assert out2["by_platform"]["instagram"]["scheduled_for"] == "2026-11-19T16:50:00Z"
+    assert out2["by_platform"]["tiktok"]["scheduled_for"] == "2026-11-19T16:00:00Z"
+
+    # 4) Filtro por plataforma em process_due_queue (ex: só TikTok às 16:05 -> publica sep_2 no TikTok sem tocar no Instagram!)
+    due_tt = scheduler.process_due_queue(
+        {prof.id: prof},
+        processed_state,
+        tmp_path / "w_due_tt",
+        now_utc=now + timedelta(minutes=65),
+        platform_filter="tiktok",
+    )
+    assert len(due_tt) == 1
+    assert due_tt[0]["platform"] == "tiktok"
+    assert len(tt_calls) == 2
+    assert len(ig_calls) == 0
+
+    # 5) Agora processa fila do Instagram (itens de 15:50 e 16:50 vencidos às 16:05 -> só 15:50 sai, 16:50 espaça!)
+    due_ig = scheduler.process_due_queue(
+        {prof.id: prof},
+        processed_state,
+        tmp_path / "w_due_ig",
+        now_utc=now + timedelta(minutes=65),
+        platform_filter="instagram",
+    )
+    assert len(due_ig) == 1
+    assert due_ig[0]["platform"] == "instagram"
+    assert len(ig_calls) == 1
+
+
+def test_advancing_post_pulls_subsequent_queue_slots_to_interval(tmp_path: Path, monkeypatch):
+    store = DriveStore(fallback_local_dir=tmp_path / "drive_advance_reflow")
+    prof = _make_profile()
+    prof.publishing.drip_interval_minutes = 60
+    prof.publishing.quiet_hours_brt = [3, 9]
+    prof.publishing.instagram.enabled = True
+    prof.publishing.facebook.enabled = False
+    prof.publishing.tiktok.enabled = True
+    prof.publishing.youtube_shorts.enabled = False
+
+    mp4 = tmp_path / "adv.mp4"
+    mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    m1, _ = store.upload_file(mp4, ["cortes", "criador_01", "adv_1"], "master_1080p60.mp4")
+    m2, _ = store.upload_file(mp4, ["cortes", "criador_01", "adv_2"], "master_1080p60.mp4")
+    m3, _ = store.upload_file(mp4, ["cortes", "criador_01", "adv_3"], "master_1080p60.mp4")
+
+    processed_state = {
+        "cuts": [
+            {"cut_id": "adv_1", "profile_id": prof.id, "caption": "video um", "master_file_id": m1},
+            {"cut_id": "adv_2", "profile_id": prof.id, "caption": "video dois", "master_file_id": m2},
+            {"cut_id": "adv_3", "profile_id": prof.id, "caption": "video tres", "master_file_id": m3},
+        ]
+    }
+
+    # Agora = 19:37 BRT (22:37 UTC). Video 1 faltava 23 min (23:00 UTC), Video 2 às 00:00 UTC, Video 3 às 01:00 UTC.
+    now = datetime(2026, 11, 19, 22, 37, 0, tzinfo=timezone.utc)
+    store.save_state_json(
+        "drip_queue.json",
+        {
+            "last_published_by_profile": {},
+            "last_published_by_platform": {},
+            "items": [
+                {"id": "adv_1::instagram", "cut_id": "adv_1", "profile_id": prof.id, "platform": "instagram", "platforms": ["instagram"], "scheduled_for": "2026-11-19T23:00:00Z", "status": "pending", "created_at": "2026-11-19T22:00:00Z"},
+                {"id": "adv_2::instagram", "cut_id": "adv_2", "profile_id": prof.id, "platform": "instagram", "platforms": ["instagram"], "scheduled_for": "2026-11-20T00:00:00Z", "status": "pending", "created_at": "2026-11-19T22:01:00Z"},
+                {"id": "adv_3::instagram", "cut_id": "adv_3", "profile_id": prof.id, "platform": "instagram", "platforms": ["instagram"], "scheduled_for": "2026-11-20T01:00:00Z", "status": "pending", "created_at": "2026-11-19T22:02:00Z"},
+                {"id": "adv_2::tiktok", "cut_id": "adv_2", "profile_id": prof.id, "platform": "tiktok", "platforms": ["tiktok"], "scheduled_for": "2026-11-20T00:10:00Z", "status": "pending", "created_at": "2026-11-19T22:01:00Z"},
+            ],
+        },
+    )
+
+    class FakeIG:
+        is_ready = True
+        is_instagram_login_token = False
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def publish_reel(self, *a, **kw):
+            return "ig_adv_1"
+
+    monkeypatch.setattr("src.publisher.drip_scheduler.InstagramReelsPublisher", FakeIG)
+
+    scheduler = DripScheduler(store)
+    reports = scheduler.process_due_queue(
+        {prof.id: prof},
+        processed_state,
+        tmp_path / "work_adv",
+        now_utc=now,
+        force_next=True,
+        platform_filter="instagram",
+    )
+    assert len(reports) == 1
+    assert reports[0]["cut"]["cut_id"] == "adv_1"
+
+    st = store.load_state_json("drip_queue.json", {})
+    by_id = {it["id"]: it for it in st["items"]}
+    assert by_id["adv_1::instagram"]["status"] == "published"
+    # Video 2 e Video 3 devem ser puxados para 22:37 + 60m = 23:37 UTC e 00:37 UTC!
+    assert by_id["adv_2::instagram"]["scheduled_for"] == "2026-11-19T23:37:00Z"
+    assert by_id["adv_3::instagram"]["scheduled_for"] == "2026-11-20T00:37:00Z"
+    # Fila do TikTok permanece intocada!
+    assert by_id["adv_2::tiktok"]["scheduled_for"] == "2026-11-20T00:10:00Z"
+
+    # Também testa force_immediate=True (Postar Agora no adv_2 em 23:00 UTC -> adv_3 vai para 00:00 UTC)
+    later = now + timedelta(minutes=23)
+    out = scheduler.enqueue_or_publish_cut(
+        profile=prof,
+        cut_dict=processed_state["cuts"][1],
+        platforms=["instagram"],
+        work_dir=tmp_path / "work_adv2",
+        force_immediate=True,
+        now_utc=later,
+    )
+    assert out["mode"] == "published_now"
+    st2 = store.load_state_json("drip_queue.json", {})
+    by_id2 = {it["id"]: it for it in st2["items"]}
+    assert by_id2["adv_3::instagram"]["scheduled_for"] == "2026-11-20T00:00:00Z"
+
+
