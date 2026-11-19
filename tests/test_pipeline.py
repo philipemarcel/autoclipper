@@ -1815,3 +1815,84 @@ def test_tiktok_inbox_full_diagnostic_and_extended_rate_limit_retries(tmp_path: 
     assert it["retry_count"] == 4
     assert "@phiuphiufiu" in it["last_error"]
     assert it["scheduled_for"] == "2026-11-19T18:40:00Z"
+
+
+def test_cron_grace_window_and_tiktok_catchup_does_not_delay_feed_posts(tmp_path: Path, monkeypatch):
+    store = DriveStore(fallback_local_dir=tmp_path / "drive_grace")
+    prof = _make_profile()
+    prof.publishing.drip_interval_minutes = 60
+    prof.publishing.quiet_hours_brt = [3, 9]
+    prof.publishing.instagram.enabled = True
+    prof.publishing.facebook.enabled = False
+    prof.publishing.tiktok.enabled = True
+    prof.publishing.youtube_shorts.enabled = False
+
+    mp4 = tmp_path / "g.mp4"
+    mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    m1, _ = store.upload_file(mp4, ["cortes", "criador_01", "g1"], "master_1080p60.mp4")
+    m2, _ = store.upload_file(mp4, ["cortes", "criador_01", "g2"], "master_1080p60.mp4")
+
+    processed_state = {
+        "cuts": [
+            {"cut_id": "g_catchup", "profile_id": prof.id, "caption": "um", "master_file_id": m1},
+            {"cut_id": "g_fresh", "profile_id": prof.id, "caption": "dois", "master_file_id": m2},
+        ]
+    }
+    now = datetime(2026, 11, 19, 18, 0, 35, tzinfo=timezone.utc)
+    store.save_state_json(
+        "drip_queue.json",
+        {
+            "last_published_by_profile": {prof.id: "2026-11-19T16:30:00Z"},
+            "items": [
+                {
+                    "cut_id": "g_catchup",
+                    "profile_id": prof.id,
+                    "platforms": ["tiktok"],
+                    "scheduled_for": "2026-11-19T17:58:00Z",
+                    "status": "pending",
+                    "results": {"instagram_reel_id": "ig_old_1"},
+                    "retry_count": 1,
+                },
+                {
+                    "cut_id": "g_fresh",
+                    "profile_id": prof.id,
+                    "platforms": ["instagram"],
+                    "scheduled_for": "2026-11-19T18:01:10Z",  # 35s no futuro -> dentro da tolerância cron 120s!
+                    "status": "pending",
+                },
+            ],
+        },
+    )
+
+    ig_calls = []
+    tt_calls = []
+
+    class FakeIG:
+        is_ready = True
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def publish_reel(self, *a, **kw):
+            ig_calls.append(1)
+            return "ig_new_2"
+
+    class FakeTT:
+        is_ready = True
+        last_publish_mode = "inbox_fallback"
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def publish_video(self, *a, **kw):
+            tt_calls.append(1)
+            return "tt_catchup_1"
+
+    monkeypatch.setattr("src.publisher.drip_scheduler.InstagramReelsPublisher", FakeIG)
+    monkeypatch.setattr("src.publisher.drip_scheduler.TikTokPublisher", FakeTT)
+
+    scheduler = DripScheduler(store)
+    reports = scheduler.process_due_queue({prof.id: prof}, processed_state, tmp_path / "work_g", now_utc=now)
+    assert len(reports) == 2
+    assert len(tt_calls) == 1
+    assert len(ig_calls) == 1

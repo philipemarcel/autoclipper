@@ -427,7 +427,8 @@ class DripScheduler:
 
         for item in pending_ordered:
             due_dt = _parse_iso(item["scheduled_for"])
-            if due_dt > now:
+            # Tolerância de 120s para jitter/atraso do cron do GitHub Actions
+            if (due_dt - now).total_seconds() > 120:
                 continue
 
             prof = profiles_by_id.get(item["profile_id"])
@@ -483,7 +484,12 @@ class DripScheduler:
                 posted_content = any(
                     res.get(k) for k in ("instagram_reel_id", "facebook_reel_id", "tiktok_publish_id", "youtube_short_url")
                 )
-                if posted_content:
+                posted_feed_content = any(
+                    bool(res.get(k)) and not bool(existing_res.get(k))
+                    for k in ("instagram_reel_id", "facebook_reel_id", "youtube_short_url")
+                )
+                # Retries exclusivos do TikTok não devem roubar nem atrasar a janela horária de IG/FB/YT
+                if posted_content and (posted_feed_content or not existing_res):
                     state.setdefault("last_published_by_profile", {})[prof.id] = _to_iso_utc(now)
                     min_spacing_profiles[prof.id] = now
 
