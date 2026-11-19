@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.ai.audio_cleaner import AudioCleaner
+from src.ai.content_moderator import moderate_video_for_platforms
 from src.ai.director import GeminiDirector
 from src.ai.transcriber import WordTranscriber
 from src.approval.discord_notifier import DiscordNotifier
@@ -171,12 +172,34 @@ def process_single_cluster(
         meta_dict["clip_ids"] = [c.id for c in cluster.clips]
         if cluster.best_clip.created_at:
             meta_dict["clip_created_at"] = cluster.best_clip.created_at
+
+        # 7.5. Moderação automática visual + áudio por plataforma (Instagram vs YouTube Shorts vs TikTok)
+        enabled_platforms: List[str] = []
+        if profile.publishing.instagram.enabled:
+            enabled_platforms.append("instagram")
+        if profile.publishing.youtube_shorts.enabled:
+            enabled_platforms.append("youtube_shorts")
+        if profile.publishing.tiktok.enabled:
+            enabled_platforms.append("tiktok")
+
+        cut_transcript = " ".join(
+            w.word for w in words if (decision.main_start - 0.5) <= w.start <= (decision.main_end + 0.5)
+        )
+        moderation = moderate_video_for_platforms(
+            video_path=rendered.master_mp4,
+            requested_platforms=enabled_platforms,
+            title=f"{cluster.dominant_title or ''} {decision.caption_text}",
+            transcript_text=cut_transcript,
+        )
+        meta_dict["moderation"] = moderation.to_dict()
+
         meta_path.write_text(json.dumps(meta_dict, ensure_ascii=False, indent=2), encoding="utf-8")
         store.upload_file(meta_path, drive_parts, "metadata.json")
 
-        # 8. Envia prévia (<9 MB) + botões de 1 clique no Discord
+        # 8. Envia prévia (<9 MB) no Discord e aplica Auto-Postagem nas plataformas aprovadas pela moderação
         notifier = DiscordNotifier(profile)
-        active_drip_min = DripScheduler(store).get_effective_interval_minutes(profile)
+        scheduler = DripScheduler(store)
+        active_drip_min = scheduler.get_effective_interval_minutes(profile)
         msg_id = notifier.send_cut_for_approval(
             record,
             rendered.discord_preview_mp4,
@@ -184,6 +207,32 @@ def process_single_cluster(
         )
         record.discord_message_id = msg_id
         meta_dict["discord_message_id"] = msg_id
+
+        auto_publish_safe = os.getenv("AUTO_PUBLISH_SAFE", "true").strip().lower() not in ("0", "false", "no")
+        if auto_publish_safe and enabled_platforms:
+            if moderation.allowed_platforms:
+                outcome = scheduler.enqueue_or_publish_cut(
+                    profile=profile,
+                    cut_dict=meta_dict,
+                    platforms=moderation.allowed_platforms,
+                    force_immediate=False,
+                )
+                meta_dict["auto_publish_outcome"] = outcome
+                if moderation.blocked_platforms:
+                    notifier.post_status_reply(
+                        msg_id,
+                        f"🤖 **Auto-Postagem por Plataforma (`{moderation.exposure_level}`)**: enviado/enfileirado automaticamente em `{', '.join(moderation.allowed_platforms)}` e filtrado de `{', '.join(moderation.blocked_platforms)}` ({moderation.reason}).",
+                    )
+                else:
+                    notifier.post_status_reply(
+                        msg_id,
+                        f"🤖 **Auto-Postagem Aprovada (`{moderation.exposure_level}`)**: enviado/enfileirado automaticamente em `{', '.join(moderation.allowed_platforms)}`.",
+                    )
+            else:
+                notifier.post_status_reply(
+                    msg_id,
+                    f"🚫 **Retido pela Moderação Automática (`{moderation.exposure_level}`)**: bloqueado em todas as plataformas ({moderation.reason}). Use os botões acima apenas se quiser aprovar manualmente.",
+                )
 
         # 9. Salva imediatamente no estado global para evitar duplicação
         processed_state.setdefault("cuts", []).append(meta_dict)
