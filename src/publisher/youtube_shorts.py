@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from src.config_loader import get_env_secret
-from src.ffmpeg_utils import get_ffmpeg_exe
+from src.ffmpeg_utils import get_ffmpeg_bin
 from src.models import ProfileConfig
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ def extract_striking_thumbnail(video_path: Path, out_jpg: Path) -> Optional[Path
         pass
 
     # Fallback via FFmpeg em 35% do vídeo
-    ffmpeg = get_ffmpeg_exe()
+    ffmpeg = get_ffmpeg_bin()
     proc = subprocess.run(
         [ffmpeg, "-y", "-ss", "2.0", "-i", str(video_path), "-frames:v", "1", "-q:v", "3", str(out_jpg)],
         capture_output=True,

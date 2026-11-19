@@ -1155,6 +1155,8 @@ def test_non_twitch_creator_name_does_not_leak_profile_alanzoka(tmp_path: Path, 
 
 
 def test_youtube_shorts_publisher_metadata_and_discord_buttons(tmp_path: Path, monkeypatch):
+    from zoneinfo import ZoneInfo
+
     from src.approval.discord_notifier import DiscordNotifier
     from src.publisher.youtube_shorts import YouTubeShortsPublisher, compute_youtube_publish_at
 
