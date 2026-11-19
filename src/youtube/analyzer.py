@@ -184,7 +184,9 @@ class YouTubeMomentAnalyzer:
         info = self.fetch_metadata(url, work_dir)
         video_id = str(info.get("id") or hashlib.sha1(url.encode("utf-8")).hexdigest()[:10])
         title = str(info.get("title") or "YouTube Video")
-        uploader = str(info.get("uploader") or info.get("channel") or self.profile.display_name)
+        handle_match = re.search(r"/@([A-Za-z0-9._-]+)", url)
+        url_handle = handle_match.group(1) if handle_match else ""
+        uploader = str(info.get("uploader") or info.get("channel") or info.get("uploader_id") or url_handle or "YouTube")
         is_live = bool(info.get("is_live"))
         duration = float(info.get("duration") or 0.0)
 
@@ -580,7 +582,7 @@ Responda ESTRITAMENTE em JSON válido:
             vod_offset=start_sec,
         )
 
-        clean_uploader = re.sub(r"[^\w]", "", uploader).lower() or self.profile.twitch_login
+        clean_uploader = re.sub(r"[^\w]", "", uploader).lower() or "youtube"
         return MomentCluster(
             cluster_id=cluster_id,
             profile_id=self.profile.id,

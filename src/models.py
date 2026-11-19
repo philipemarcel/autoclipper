@@ -198,6 +198,7 @@ class CutRecord:
     clean_file_id: str
     srt_file_id: str
     created_at: str
+    creator_name: str = ""
     download_url: str = ""
     status: str = "pending_approval"  # pending_approval | queued | published | rejected
     audio_cleaned: bool = False

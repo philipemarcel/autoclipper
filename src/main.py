@@ -115,6 +115,7 @@ def process_single_cluster(
         copy_path.write_text(decision.full_social_copy, encoding="utf-8")
 
         creator_slug = cluster.broadcaster_login or profile.twitch_login or profile.id
+        creator_display = str(cluster.best_clip.broadcaster_name or creator_slug or profile.display_name).strip()
         date_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         stream_folder = f"{date_prefix}_{cluster.stream_or_vod_key}"
         anchor_label = f"vod{cluster.peak_offset}s" if cluster.peak_offset is not None else "clip"
@@ -151,6 +152,7 @@ def process_single_cluster(
             clean_file_id=clean_id,
             srt_file_id=srt_id,
             created_at=_utc_now_iso(),
+            creator_name=creator_display,
             download_url=download_url,
         )
 

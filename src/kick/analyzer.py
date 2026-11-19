@@ -290,7 +290,7 @@ class KickMomentAnalyzer:
             if not clip:
                 return []
             c_slug = str((clip.get("channel") or {}).get("slug") or slug or "kick")
-            c_user = str((clip.get("creator") or {}).get("username") or (clip.get("channel") or {}).get("username") or c_slug)
+            c_user = str((clip.get("channel") or {}).get("username") or (clip.get("user") or {}).get("username") or c_slug)
             stream_url = str(clip.get("clip_url") or clip.get("video_url") or url)
             return [
                 self._build_clip_cluster(

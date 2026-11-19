@@ -140,8 +140,12 @@ class DiscordNotifier:
             ig_enabled=self.profile.publishing.instagram.enabled,
             tt_enabled=self.profile.publishing.tiktok.enabled,
         )
+        creator_label = (
+            cut.creator_name.strip()
+            or (f"@{cut.twitch_login}" if cut.twitch_login else self.profile.display_name)
+        )
         payload_json = {
-            "content": f"**Novo corte pronto de `{self.profile.display_name}`!** Assista à prévia abaixo e aprove com 1 clique:",
+            "content": f"**Novo corte pronto de `{creator_label}`!** Assista à prévia abaixo e aprove com 1 clique:",
             "embeds": [embed],
             "components": components,
         }

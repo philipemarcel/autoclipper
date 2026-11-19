@@ -1066,3 +1066,89 @@ def test_instagram_reels_dual_login_and_placeholder_guard(tmp_path: Path, monkey
     assert calls[1][1] == "https://graph.instagram.com/v21.0/178414001/media"
     assert calls[1][2]["video_url"].startswith("https://drive.google.com/")
     assert calls[3][1] == "https://graph.instagram.com/v21.0/178414001/media_publish"
+
+
+def test_non_twitch_creator_name_does_not_leak_profile_alanzoka(tmp_path: Path, monkeypatch):
+    from src.approval.discord_notifier import DiscordNotifier
+
+    prof = _make_profile()
+    prof.twitch_login = "alanzoka"
+    prof.display_name = "Alanzoka"
+
+    # Director com cluster Kick do Davy Jones nunca deve usar Alanzoka no fallback/tags
+    director = GeminiDirector(prof, api_key="", groq_api_key="")
+    cl = MomentCluster(
+        cluster_id="c_davy",
+        profile_id=prof.id,
+        broadcaster_login="davyjones",
+        stream_or_vod_key="kick_1",
+        mode="kick_clip",
+        clips=[TwitchClip("k1", "https://kick.com/davyjones", "davy clip", 200, "", 35.0, "viewer1", "kick", "Davy Jones")],
+        video_id="k1",
+        vod_start_offset=0,
+        vod_end_offset=35,
+        peak_offset=18,
+        unique_clippers=1,
+        total_views=200,
+        max_views=200,
+        score=95.0,
+        dominant_title="",
+        game_name="GTA RP",
+    )
+    dec = director.enforce_constraints(
+        {"main_start": 0.0, "main_end": 35.0, "cold_open_enabled": False, "caption_text": "", "hashtags": []},
+        words=[],
+        raw_duration_sec=35.0,
+        peak_hint_sec=15.0,
+        creator_handle="davyjones",
+        creator_name="Davy Jones",
+    )
+    assert "alanzoka" not in dec.caption_text.lower()
+    assert "davy jones" in dec.caption_text.lower()
+    assert "#davyjones" in dec.hashtags
+    assert "#alanzoka" not in dec.hashtags
+
+    # DiscordNotifier deve anunciar Davy Jones em vez de profile.display_name (Alanzoka)
+    captured = {}
+
+    class FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"id": "m_davy"}
+
+    def fake_post(url, headers=None, data=None, files=None, timeout=None):
+        captured["payload"] = json.loads(data["payload_json"])
+        return FakeResp()
+
+    monkeypatch.setattr("src.approval.discord_notifier.requests.post", fake_post)
+    dummy_mp4 = tmp_path / "davy.mp4"
+    dummy_mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    rec = CutRecord(
+        cut_id="cut_davy_1",
+        profile_id=prof.id,
+        twitch_login="davyjones",
+        stream_key="kick_1",
+        mode="kick_clip",
+        score=95.0,
+        source_type="kick_clip",
+        video_id="k1",
+        vod_anchor_sec=None,
+        clip_urls=[],
+        caption="legenda",
+        teaser_headline="",
+        total_duration=35.0,
+        layout_used="split_screen",
+        drive_folder_id="f1",
+        drive_folder_url="https://drive.google.com/f1",
+        master_file_id="m1",
+        master_file_url="https://drive.google.com/m1",
+        clean_file_id="c1",
+        srt_file_id="s1",
+        created_at="2026-11-18T18:00:00Z",
+        creator_name="Davy Jones",
+    )
+    DiscordNotifier(prof, bot_token="bot_x", channel_id="chan_x").send_cut_for_approval(rec, dummy_mp4)
+    assert "Davy Jones" in captured["payload"]["content"]
+    assert "Alanzoka" not in captured["payload"]["content"]

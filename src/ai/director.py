@@ -108,6 +108,11 @@ class GeminiDirector:
         self.groq_api_key = (groq_api_key if groq_api_key is not None else os.getenv("GROQ_API_KEY", "")).strip()
         self.groq_model = os.getenv("GROQ_DIRECTOR_MODEL", "openai/gpt-oss-120b").strip()
 
+    def _resolve_cluster_creator(self, cluster: MomentCluster) -> tuple[str, str]:
+        handle = (cluster.broadcaster_login or self.profile.twitch_login or "").strip()
+        name = (cluster.best_clip.broadcaster_name or handle or self.profile.display_name or "").strip()
+        return handle, name
+
     def direct_cut(
         self,
         cluster: MomentCluster,
@@ -119,6 +124,7 @@ class GeminiDirector:
         # Clipes curtos da comunidade (Twitch/Kick <= 65s) e captura ao vivo da Kick (`<= 65s`) são preservados íntegros
         preserve_full_clip = cluster.mode in ("live_hot", "post_live", "kick_clip", "kick_live")
         prefer_clip_ending = cluster.mode == "kick_clip"
+        creator_handle, creator_name = self._resolve_cluster_creator(cluster)
 
         # 1. Tenta Gemini quando chave AIza válida estiver configurada
         if self.api_key and not self.api_key.startswith("AQ."):
@@ -131,6 +137,8 @@ class GeminiDirector:
                     peak_hint_sec,
                     preserve_full_clip=preserve_full_clip,
                     prefer_clip_ending=prefer_clip_ending,
+                    creator_handle=creator_handle,
+                    creator_name=creator_name,
                 )
             except Exception as exc:
                 logger.warning("Gemini falhou (%s). Acionando motor LLM Groq 120B...", exc)
@@ -146,6 +154,8 @@ class GeminiDirector:
                     peak_hint_sec,
                     preserve_full_clip=preserve_full_clip,
                     prefer_clip_ending=prefer_clip_ending,
+                    creator_handle=creator_handle,
+                    creator_name=creator_name,
                 )
             except Exception as exc:
                 logger.warning("Groq LLM falhou (%s). Tentando fallback...", exc)
@@ -161,6 +171,8 @@ class GeminiDirector:
                     peak_hint_sec,
                     preserve_full_clip=preserve_full_clip,
                     prefer_clip_ending=prefer_clip_ending,
+                    creator_handle=creator_handle,
+                    creator_name=creator_name,
                 )
             except Exception as exc:
                 logger.warning("Chave Gemini AQ. não aceita no endpoint público (%s).", exc)
@@ -187,12 +199,7 @@ class GeminiDirector:
         is_youtube = cluster.mode.startswith("youtube")
         is_kick = cluster.mode.startswith("kick")
         is_external_stream = is_youtube or cluster.mode in ("kick_vod", "kick_live")
-        creator_name = (
-            cluster.best_clip.broadcaster_name
-            if (is_youtube or is_kick) and cluster.best_clip.broadcaster_name
-            else self.profile.display_name
-        )
-        creator_handle = cluster.broadcaster_login or self.profile.twitch_login
+        creator_handle, creator_name = self._resolve_cluster_creator(cluster)
         platform_label = "YouTube" if is_youtube else ("Kick" if is_kick else "Twitch")
         if is_youtube:
             default_tags = f'["#{creator_handle}", "#fy", "#fyp", "#viral", "#cortes"]'
@@ -332,6 +339,8 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
         peak_hint_sec: float,
         preserve_full_clip: bool = True,
         prefer_clip_ending: bool = False,
+        creator_handle: str = "",
+        creator_name: str = "",
     ) -> DirectorDecision:
         edt = self.profile.editing
         max_total = min(edt.max_duration_seconds, raw_duration_sec)
@@ -426,7 +435,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
         spoken_fallback = extract_spoken_quote_fallback(words, main_start, main_end, peak_hint_sec)
         raw_cap = str(raw.get("caption_text") or "").strip()
         if not raw_cap or raw_cap.lower().startswith("momento absurdo na live"):
-            raw_cap = spoken_fallback or cluster_fallback_caption(self.profile)
+            raw_cap = spoken_fallback or cluster_fallback_caption(self.profile, creator_name=creator_name)
         caption = re.sub(r"\s+", " ", raw_cap).strip()
         caption = re.sub(
             r"\s*(?:o que (?:vocês|vcs) acharam\??|comenta aí!?|compartilha com os amigos!?)\s*$",
@@ -442,7 +451,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
         raw_tags = [str(t).strip() for t in (raw.get("hashtags") or []) if str(t).strip()]
         if not raw_tags:
             raw_tags = suggest_dynamic_hashtags(
-                creator_handle=self.profile.twitch_login,
+                creator_handle=creator_handle or self.profile.twitch_login,
                 max_tags=self.profile.copy.max_hashtags,
                 base_discovery_tags=self.profile.copy.base_hashtags,
             )
@@ -509,6 +518,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             base_discovery_tags=self.profile.copy.base_hashtags,
         )
 
+        creator_handle, creator_name = self._resolve_cluster_creator(cluster)
         return self.enforce_constraints(
             {
                 "main_start": start,
@@ -527,8 +537,11 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             peak_hint_sec=peak_hint_sec,
             preserve_full_clip=preserve_full_clip,
             prefer_clip_ending=prefer_clip_ending,
+            creator_handle=creator_handle,
+            creator_name=creator_name,
         )
 
 
-def cluster_fallback_caption(profile: ProfileConfig) -> str:
-    return f"momento absurdo na live do {profile.display_name.lower()}"
+def cluster_fallback_caption(profile: ProfileConfig, creator_name: str = "") -> str:
+    label = (creator_name or profile.display_name or profile.twitch_login or "stream").strip()
+    return f"momento absurdo na live do {label.lower()}"
