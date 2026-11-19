@@ -341,10 +341,15 @@ class DripScheduler:
 
         completed_reports: List[Dict[str, Any]] = []
         changed = False
+        min_spacing_profiles: Dict[str, datetime] = {}
 
-        for item in state.get("items", []):
-            if item.get("status") != "pending":
-                continue
+        # Ordena pendentes por horário agendado para sempre respeitar a fila em ordem cronológica
+        pending_ordered = sorted(
+            [it for it in state.get("items", []) if it.get("status") == "pending"],
+            key=lambda it: str(it.get("scheduled_for") or ""),
+        )
+
+        for item in pending_ordered:
             due_dt = _parse_iso(item["scheduled_for"])
             if due_dt > now:
                 continue
@@ -362,6 +367,31 @@ class DripScheduler:
                 changed = True
                 continue
 
+            eff_minutes = self.get_effective_interval_minutes(prof, state)
+            interval = timedelta(minutes=eff_minutes)
+            min_gap = timedelta(minutes=max(10, eff_minutes - 5))
+            quiet_hours = self.get_effective_quiet_hours(prof, state)
+            tz = ZoneInfo(prof.publishing.timezone)
+
+            # Evita rajada de posts em intervalo curto quando vários itens vencem juntos
+            last_iso = state.get("last_published_by_profile", {}).get(prof.id)
+            last_dt = _parse_iso(last_iso) if last_iso else None
+            if prof.id in min_spacing_profiles:
+                anchor = min_spacing_profiles[prof.id] + interval
+                next_slot = self._push_past_quiet_hours(max(now, anchor), quiet_hours, tz)
+                min_spacing_profiles[prof.id] = next_slot
+                item["scheduled_for"] = _to_iso_utc(next_slot)
+                changed = True
+                continue
+            if last_dt is not None and (now - last_dt) < min_gap:
+                next_slot = self._push_past_quiet_hours(last_dt + interval, quiet_hours, tz)
+                if next_slot <= now:
+                    next_slot = self._push_past_quiet_hours(now + timedelta(minutes=eff_minutes), quiet_hours, tz)
+                min_spacing_profiles[prof.id] = next_slot
+                item["scheduled_for"] = _to_iso_utc(next_slot)
+                changed = True
+                continue
+
             try:
                 if item.get("caption"):
                     cut_dict["caption"] = str(item["caption"])
@@ -374,8 +404,12 @@ class DripScheduler:
                     existing_results=existing_res,
                 )
                 item["results"] = res
-                if res:
+                posted_content = any(
+                    res.get(k) for k in ("instagram_reel_id", "facebook_reel_id", "tiktok_publish_id", "youtube_short_url")
+                )
+                if posted_content:
                     state.setdefault("last_published_by_profile", {})[prof.id] = _to_iso_utc(now)
+                    min_spacing_profiles[prof.id] = now
 
                 if not failed_plats:
                     item["status"] = "published"

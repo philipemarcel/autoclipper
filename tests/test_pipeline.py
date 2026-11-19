@@ -1410,3 +1410,62 @@ def test_facebook_reels_publisher_flow(tmp_path: Path, monkeypatch):
     vid_id = fb.publish_reel(mp4, caption="clip brabo #cortes")
     assert vid_id == "fb_vid_77"
     assert len(posts) == 3
+
+
+def test_process_due_queue_enforces_spacing_on_backlog(tmp_path: Path, monkeypatch):
+    store = DriveStore(fallback_local_dir=tmp_path / "drive_spacing")
+    prof = _make_profile()
+    prof.publishing.drip_interval_minutes = 60
+    prof.publishing.quiet_hours_brt = [3, 9]
+    prof.publishing.instagram.enabled = True
+    prof.publishing.facebook.enabled = False
+    prof.publishing.tiktok.enabled = False
+    prof.publishing.youtube_shorts.enabled = False
+
+    master = tmp_path / "m_sp.mp4"
+    master.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    mid1, _ = store.upload_file(master, ["cortes", "criador_01", "sp_1"], "master_1080p60.mp4")
+    mid2, _ = store.upload_file(master, ["cortes", "criador_01", "sp_2"], "master_1080p60.mp4")
+
+    processed_state = {
+        "cuts": [
+            {"cut_id": "sp_1", "profile_id": prof.id, "caption": "um", "master_file_id": mid1},
+            {"cut_id": "sp_2", "profile_id": prof.id, "caption": "dois", "master_file_id": mid2},
+        ]
+    }
+    now = datetime(2026, 11, 19, 15, 0, 0, tzinfo=timezone.utc)
+    store.save_state_json(
+        "drip_queue.json",
+        {
+            "last_published_by_profile": {},
+            "items": [
+                {"cut_id": "sp_1", "profile_id": prof.id, "platforms": ["instagram"], "scheduled_for": "2026-11-19T14:00:00Z", "status": "pending"},
+                {"cut_id": "sp_2", "profile_id": prof.id, "platforms": ["instagram"], "scheduled_for": "2026-11-19T14:30:00Z", "status": "pending"},
+            ],
+        },
+    )
+
+    ig_posts = []
+
+    class FakeIG:
+        is_ready = True
+        is_instagram_login_token = False
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def publish_reel(self, video_path, caption, **kw):
+            ig_posts.append(caption)
+            return f"ig_{len(ig_posts)}"
+
+    monkeypatch.setattr("src.publisher.drip_scheduler.InstagramReelsPublisher", FakeIG)
+
+    scheduler = DripScheduler(store)
+    reports = scheduler.process_due_queue({prof.id: prof}, processed_state, tmp_path / "work", now_utc=now)
+    assert len(reports) == 1
+    assert ig_posts == ["um"]
+
+    st = store.load_state_json("drip_queue.json", {})
+    assert st["items"][0]["status"] == "published"
+    assert st["items"][1]["status"] == "pending"
+    assert st["items"][1]["scheduled_for"] == "2026-11-19T16:00:00Z"
