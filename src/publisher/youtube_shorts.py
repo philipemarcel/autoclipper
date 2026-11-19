@@ -77,10 +77,15 @@ class YouTubeShortsPublisher:
         base_title = (non_tag_lines[0] if non_tag_lines else str(title_hint or "Corte da live")).strip()
         base_title = re.sub(r"\s+", " ", base_title)
 
-        if "#shorts" not in base_title.lower() and len(base_title) <= 91:
+        # Mantém título <= 58 chars para não cortar no feed mobile do YouTube Shorts; #Shorts vai sempre na descrição
+        if "#shorts" not in base_title.lower() and len(base_title) <= 48:
             final_title = f"{base_title} #Shorts"
         else:
-            final_title = base_title[:100].strip()
+            if len(base_title) > 58:
+                cut_at = base_title.rfind(" ", 0, 56)
+                final_title = base_title[: (cut_at if cut_at > 25 else 56)].rstrip(" ,;:") + "..."
+            else:
+                final_title = base_title
 
         description = raw_caption or base_title
         if "#shorts" not in description.lower():

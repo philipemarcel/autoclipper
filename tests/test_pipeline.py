@@ -807,9 +807,9 @@ def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):
     assert "kscerato" in prompt
     assert "Google Trends tempo real" in prompt
     assert "#cortesdegames" in prompt
-    assert "LEGENDA DA POSTAGEM BASEADA NO QUE O STREAMER FALOU" in prompt
+    assert "LEGENDA NATURAL + SEO BASEADA NO QUE O STREAMER FALOU" in prompt
     assert "1 única linha curta em caixa baixa" in prompt
-    assert "PROIBIDO inventar fala fora da transcrição" in prompt
+    assert "PROIBIDO usar `ele gritou" in prompt
     assert "REFERÊNCIAS REAIS DE LEGENDAS DE CLIPS DE JOGOS NA WEB" not in prompt
 
     # Sem falas claras (<3 palavras), fallback usa título em caixa baixa
@@ -1169,16 +1169,22 @@ def test_youtube_shorts_publisher_metadata_and_discord_buttons(tmp_path: Path, m
     assert yt_pub.is_ready is True
 
     meta = yt_pub.build_video_metadata(
-        caption='ele mandou um "não tenho mões" no meio do desespero\n\n#davyjones #gtarp #cortesdegames',
-        title_hint="NAO TENHO MOES",
+        caption="davy jones impressionado com golfinhos no gta 6\n\n#davyjones #gta6 #cortesdegames",
+        title_hint="GOLFINHOS NO GTA 6",
     )
-    assert len(meta["snippet"]["title"]) <= 100
+    assert len(meta["snippet"]["title"]) <= 58
     assert "#Shorts" in meta["snippet"]["title"]
     assert "#Shorts" in meta["snippet"]["description"]
     assert meta["snippet"]["categoryId"] == "20"
     assert "davyjones" in meta["snippet"]["tags"]
     assert "Shorts" in meta["snippet"]["tags"]
     assert meta["status"]["privacyStatus"] == "public"
+
+    long_meta = yt_pub.build_video_metadata(
+        caption="essa frase propositalmente bem mais longa serve para testar o corte antes da truncagem mobile",
+    )
+    assert len(long_meta["snippet"]["title"]) <= 59
+    assert "#Shorts" in long_meta["snippet"]["description"]
 
     # Mock resumable upload via Google API
     uploaded = {}

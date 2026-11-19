@@ -56,14 +56,14 @@ profiles:
       watermark_text: ""
 
     copy:
-      # Descrição compacta (40-85 chars) comparada com cortes virais da web + 4-5 hashtags em alta no TikTok/Reels
-      style: "compact_hook"
+      # Legenda natural em 1 linha baseada no que o streamer falou + hashtags de nicho (sem #fyp/#viral genéricos)
+      style: "minimal_meme"
       max_hashtags: 5
       base_hashtags:
         - "#cortesdegames"
         - "#gamerbrasil"
-        - "#fyp"
-        - "#viral"
+        - "#humorgamer"
+        - "#clips"
 
     discord:
       bot_token_env: "DISCORD_BOT_TOKEN"

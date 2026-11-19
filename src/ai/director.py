@@ -202,11 +202,11 @@ class GeminiDirector:
         creator_handle, creator_name = self._resolve_cluster_creator(cluster)
         platform_label = "YouTube" if is_youtube else ("Kick" if is_kick else "Twitch")
         if is_youtube:
-            default_tags = f'["#{creator_handle}", "#fy", "#fyp", "#viral", "#cortes"]'
+            default_tags = f'["#{creator_handle}", "#cortesdegames", "#gamerbrasil", "#clips"]'
         elif is_kick:
-            default_tags = f'["#{creator_handle}", "#fy", "#fyp", "#viral", "#kick"]'
+            default_tags = f'["#{creator_handle}", "#cortesdegames", "#gamerbrasil", "#kick"]'
         else:
-            default_tags = f'["#{creator_handle}", "#fy", "#fyp", "#viral", "#cortes"]'
+            default_tags = f'["#{creator_handle}", "#cortesdegames", "#gamerbrasil", "#humorgamer"]'
 
         live_trends = fetch_brazil_realtime_trends(limit=15)
         trends_hint = ", ".join(live_trends) if live_trends else "(indisponível no momento)"
@@ -261,16 +261,23 @@ REGRAS OBRIGATÓRIAS DE EDIÇÃO:
    - Máximo 4 a 5 palavras curtas que aparecem na tela nos 2-3s iniciais.
    - Baseie-se LITERALMENTE no título/assunto do momento (`{cluster.dominant_title}`) ou na frase mais engraçada dita na transcrição.
    - PROIBIDO usar clichês genéricos de IA como "JOGADA DE OURO", "MOMENTO ÉPICO", "IMPERDÍVEL", "INACREDITÁVEL".
-4. LEGENDA DA POSTAGEM BASEADA NO QUE O STREAMER FALOU (`caption_text` e `hashtags`):
-   - `caption_text`: **1 única linha curta em caixa baixa**, estilo página real de cortes no TikTok/Reels, **SEMPRE ligada ao que o streamer realmente falou na `TRANSCRIÇÃO COM TIMESTAMPS`** dentro do trecho cortado (`main_start` até `main_end`).
-   - Leia as falas com atenção e pesque a **pérola, gafe, desculpa ou frase mais engraçada/marcante dita pelo criador**: cite a frase entre aspas ou faça uma legenda curta em cima exatamente do que ele falou (ex: `ele simplesmente mandou um "<frase literal engraçada da transcrição>" kkkkk`, `<frase marcante dita no clipe> 💀`).
+4. LEGENDA NATURAL + SEO BASEADA NO QUE O STREAMER FALOU (`caption_text` e `hashtags`):
+   - `caption_text`: **1 única linha curta em caixa baixa** (soando 100% humana, como alguém escrevendo a legenda de uma página real de cortes), baseada **no assunto, descoberta ou reação que o streamer falou na `TRANSCRIÇÃO COM TIMESTAMPS`** entre `main_start` e `main_end`.
+   - Varie a forma de escrever naturalmente com palavras-chave do jogo/criador (bom para busca no TikTok, Reels e Shorts):
+     * `"o jogo tem até golfinho agora"`
+     * `"{creator_handle} impressionado com os golfinhos no jogo"`
+     * `"ele descobrindo staff da twitch no chat"`
+     * `"não tenho mões"` (quando for uma pérola isolada muito forte)
+   - ESTRITAMENTE PROIBIDO soar como IA usando moldes repetitivos:
+     * PROIBIDO usar `ele gritou "..." kkkkk`, `ele soltou um "..."`, `ele mandou um "..."`, `simplesmente "..."`.
+     * PROIBIDO forçar `kkkkk` ou emojis em toda legenda.
+     * PROIBIDO inventar fala fora da transcrição ou clichês (`"galera surtando"`, `"segura essa"`, `"o que acharam?"`).
    - Só use o título do clipe (`{cluster.dominant_title}`) se não houver fala clara na transcrição (`"(Sem falas detectadas)"`).
-   - PROIBIDO inventar fala fora da transcrição, mandar comentário aleatório sem relação com o vídeo, ou usar frases artificiais de IA como "galera surtando", "segura essa", "deixou todo mundo de cara", "o que acharam?".
-   - `hashtags`: compare diretamente com "HASHTAGS MAIS USADAS EM CLIPS DE JOGOS VIRAIS NA WEB" e "Buscas reais em alta" acima, escolhendo de 4 a {self.profile.copy.max_hashtags} hashtags combinando:
+   - `hashtags`: **3 a {self.profile.copy.max_hashtags} hashtags 100% de nicho** (sem desperdiçar vagas!), combinando:
      1) criador (`#{creator_handle}`),
-     2) jogo/assunto em alta na web agora (ex: `#gta6`, `#gtarp`, `#cs2`, ou termo buscado acima se bater com a cena),
-     3) nicho real de clips de games BR no TikTok/Reels (`#cortesdegames`, `#gamerbrasil`, `#humorgamer`, `#tiktokgames`),
-     4) descoberta (`#fyp`, `#fy`, `#viral`).
+     2) jogo/assunto real do clipe (ex: `#gta6`, `#gtarp`, `#cs2`, ou termo buscado acima se bater com a cena),
+     3) subnicho gamer (`#cortesdegames`, `#gamerbrasil`, `#humorgamer`, `#clips`).
+     * NÃO use tags genéricas vazias (`#fyp`, `#fy`, `#foryou`, `#viral`), pois não ajudam na indexação de nicho.
 5. CORREÇÃO DE GRAFIA DO WHISPER (`word_corrections`):
    - Se notar na transcrição alguma palavra claramente ouvida errado pelo Whisper (ex: nome de jogo, gíria ou palavra trocada), inclua no dicionário `"word_corrections": {{"palavra_errada": "palavra_certa"}}` (caso contrário, `{{}}`).
 
@@ -506,7 +513,7 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
 
         title_clean = (cluster.dominant_title or "simplesmente intancável esse momento").strip()
         spoken_quote = extract_spoken_quote_fallback(words, start, end, peak_hint_sec)
-        fallback_caption = f'"{spoken_quote}"' if spoken_quote else title_clean.lower()
+        fallback_caption = spoken_quote if spoken_quote else title_clean.lower()
         transcript_hint = " ".join(w.word for w in words[:40])
         tags = suggest_dynamic_hashtags(
             creator_handle=cluster.broadcaster_login or self.profile.twitch_login,

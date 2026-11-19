@@ -36,15 +36,14 @@ GAME_HASHTAG_ALIASES: Dict[str, List[str]] = {
     "dead by daylight": ["#dbd"],
 }
 
-# Hashtags campeãs em cortes de jogos no TikTok/Reels BR observadas em benchmarks da web
+# Hashtags 100% de nicho gamer BR (sem tags genéricas vazias como #fyp/#fy/#viral que desperdiçam slots)
 GAMING_CLIP_BENCHMARK_TAGS: List[str] = [
     "#cortesdegames",
     "#gamerbrasil",
     "#humorgamer",
-    "#tiktokgames",
-    "#fyp",
-    "#fy",
-    "#viral",
+    "#clips",
+    "#gamesbrasil",
+    "#livestream",
 ]
 
 
