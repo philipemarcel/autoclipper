@@ -320,7 +320,12 @@ class DripScheduler:
         if "instagram" in platforms and profile.publishing.instagram.enabled:
             ig = InstagramReelsPublisher(profile)
             if ig.is_ready:
-                results["instagram_reel_id"] = ig.publish_reel(local_master, caption)
+                video_url = str(cut_dict.get("download_url") or "")
+                if ig.is_instagram_login_token and not video_url:
+                    video_url = self.store.ensure_public_download_url(cut_dict["master_file_id"])
+                    if video_url:
+                        cut_dict["download_url"] = video_url
+                results["instagram_reel_id"] = ig.publish_reel(local_master, caption, video_url=video_url)
             else:
                 results["instagram"] = "skipped_unconfigured"
 

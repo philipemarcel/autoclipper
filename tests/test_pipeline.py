@@ -995,3 +995,74 @@ def test_multitenant_env_profiles_relay_and_ci_guard(tmp_path: Path, monkeypatch
     monkeypatch.setenv("GDRIVE_MOUNT_PATH", str(tmp_path / "mirror_watch"))
     monkeypatch.setattr("src.kick.analyzer.KickMomentAnalyzer.discover_channel_moments", lambda *a, **kw: [])
     assert cmd_watch() == 0
+
+
+def test_instagram_reels_dual_login_and_placeholder_guard(tmp_path: Path, monkeypatch):
+    from src.publisher.instagram_reels import InstagramReelsPublisher
+
+    prof = _make_profile()
+    prof.publishing.instagram.enabled = True
+
+    # Placeholders iniciais do .env nao podem passar como configurados
+    ph = InstagramReelsPublisher(
+        prof,
+        account_id="id_conta_instagram_creator_ou_business",
+        access_token="token_longa_duracao_meta_graph_api",
+    )
+    assert ph.is_ready is False
+
+    # Token IG... (Instagram Login sem Página Facebook) usa graph.instagram.com + video_url
+    calls = []
+
+    class FakeResp:
+        ok = True
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        calls.append(("POST", url, data or {}))
+        if url.endswith("/media"):
+            return FakeResp({"id": "cnt_ig_1", "uri": "https://rupload.facebook.com/ig-api-upload/v21.0/cnt_ig_1"})
+        if url.endswith("/media_publish"):
+            return FakeResp({"id": "media_pub_99"})
+        return FakeResp({})
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(("GET", url, params or {}))
+        if "graph.instagram.com" in url and url.endswith("/me"):
+            return FakeResp({"user_id": "178414001", "username": "cortesteste", "account_type": "CREATOR"})
+        return FakeResp({"status_code": "FINISHED"})
+
+    monkeypatch.setattr("src.publisher.instagram_reels.requests.post", fake_post)
+    monkeypatch.setattr("src.publisher.instagram_reels.requests.get", fake_get)
+    monkeypatch.setattr("scripts.setup_instagram.requests.get", fake_get)
+
+    from scripts.setup_instagram import discover_instagram_account
+
+    disc = discover_instagram_account("IGAA_test_token_123")
+    assert disc["accounts"][0]["ig_account_id"] == "178414001"
+    assert disc["accounts"][0]["ig_username"] == "cortesteste"
+
+    dummy_mp4 = tmp_path / "ig.mp4"
+    dummy_mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    ig_pub = InstagramReelsPublisher(prof, account_id="178414001", access_token="IGAA_test_token_123")
+    assert ig_pub.is_ready is True
+    assert ig_pub.is_instagram_login_token is True
+
+    media_id = ig_pub.publish_reel(
+        dummy_mp4,
+        caption="legenda teste #cortes",
+        video_url="https://drive.google.com/uc?export=download&confirm=t&id=file_123",
+    )
+    assert media_id == "media_pub_99"
+    assert calls[1][1] == "https://graph.instagram.com/v21.0/178414001/media"
+    assert calls[1][2]["video_url"].startswith("https://drive.google.com/")
+    assert calls[3][1] == "https://graph.instagram.com/v21.0/178414001/media_publish"
