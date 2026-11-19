@@ -78,7 +78,7 @@ def save_youtube_to_env_and_profile(compact_json: str, enable_profile: bool = Tr
         if prof_path.exists():
             yaml_txt = prof_path.read_text(encoding="utf-8")
             yaml_txt = re.sub(
-                r"(youtube_shorts:\s*\n\s*enabled:\s*)(false|true)",
+                r"(youtube_shorts:\s*(?:\n\s*#[^\n]*)*\n\s*enabled:\s*)(false|true)",
                 r"\1true",
                 yaml_txt,
                 count=1,

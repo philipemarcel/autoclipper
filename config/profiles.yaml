@@ -96,8 +96,7 @@ profiles:
         access_token_env: "TIKTOK_ACCESS_TOKEN"
 
       youtube_shorts:
-        # Ative rodando: .\.venv\Scripts\python.exe scripts\auth_youtube.py --save
-        enabled: false
+        enabled: true
         privacy_status: "public"
         category_id: "20"
         token_json_env: "YOUTUBE_TOKEN_JSON"
