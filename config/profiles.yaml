@@ -79,7 +79,7 @@ profiles:
       drive_retention_days: 10
 
       instagram:
-        enabled: false
+        enabled: true
         account_id_env: "IG_ACCOUNT_ID"
         access_token_env: "IG_ACCESS_TOKEN"
 
