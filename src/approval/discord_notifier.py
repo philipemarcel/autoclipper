@@ -139,6 +139,7 @@ class DiscordNotifier:
             audio_cleaned=cut.audio_cleaned,
             ig_enabled=self.profile.publishing.instagram.enabled,
             tt_enabled=self.profile.publishing.tiktok.enabled,
+            yt_enabled=self.profile.publishing.youtube_shorts.enabled,
         )
         creator_label = (
             cut.creator_name.strip()
@@ -195,8 +196,10 @@ class DiscordNotifier:
         audio_cleaned: bool = False,
         ig_enabled: bool = True,
         tt_enabled: bool = True,
+        yt_enabled: bool = False,
     ) -> List[Dict[str, Any]]:
-        if ig_enabled and tt_enabled:
+        active_count = int(bool(ig_enabled)) + int(bool(tt_enabled)) + int(bool(yt_enabled))
+        if active_count >= 2:
             row1_buttons = [
                 {
                     "type": 2,
@@ -212,21 +215,37 @@ class DiscordNotifier:
                     "emoji": {"name": "⚡"},
                     "custom_id": f"now_both:{cut_id}",
                 },
-                {
-                    "type": 2,
-                    "style": 2,
-                    "label": "Só Reels",
-                    "emoji": {"name": "📸"},
-                    "custom_id": f"approve_reels:{cut_id}",
-                },
-                {
-                    "type": 2,
-                    "style": 2,
-                    "label": "Só TikTok",
-                    "emoji": {"name": "🎵"},
-                    "custom_id": f"approve_tiktok:{cut_id}",
-                },
             ]
+            if ig_enabled:
+                row1_buttons.append(
+                    {
+                        "type": 2,
+                        "style": 2,
+                        "label": "Só Reels",
+                        "emoji": {"name": "📸"},
+                        "custom_id": f"approve_reels:{cut_id}",
+                    }
+                )
+            if tt_enabled:
+                row1_buttons.append(
+                    {
+                        "type": 2,
+                        "style": 2,
+                        "label": "Só TikTok",
+                        "emoji": {"name": "🎵"},
+                        "custom_id": f"approve_tiktok:{cut_id}",
+                    }
+                )
+            if yt_enabled:
+                row1_buttons.append(
+                    {
+                        "type": 2,
+                        "style": 2,
+                        "label": "Só Shorts",
+                        "emoji": {"name": "▶️"},
+                        "custom_id": f"approve_youtube:{cut_id}",
+                    }
+                )
         elif tt_enabled:
             row1_buttons = [
                 {
@@ -242,6 +261,23 @@ class DiscordNotifier:
                     "label": "Enviar TikTok Agora",
                     "emoji": {"name": "⚡"},
                     "custom_id": f"now_tiktok:{cut_id}",
+                },
+            ]
+        elif yt_enabled:
+            row1_buttons = [
+                {
+                    "type": 2,
+                    "style": 3,
+                    "label": f"Aprovar Shorts (Fila {drip_min}m)",
+                    "emoji": {"name": "▶️"},
+                    "custom_id": f"approve_youtube:{cut_id}",
+                },
+                {
+                    "type": 2,
+                    "style": 1,
+                    "label": "Postar Shorts Agora",
+                    "emoji": {"name": "⚡"},
+                    "custom_id": f"now_youtube:{cut_id}",
                 },
             ]
         else:

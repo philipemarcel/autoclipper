@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from src.models import ProfileConfig
 from src.publisher.instagram_reels import InstagramReelsPublisher
 from src.publisher.tiktok_poster import TikTokPublisher
+from src.publisher.youtube_shorts import YouTubeShortsPublisher
 from src.storage.gdrive import DriveStore
 
 logger = logging.getLogger(__name__)
@@ -337,5 +338,16 @@ class DripScheduler:
                     results["tiktok_mode"] = tt.last_publish_mode
             else:
                 results["tiktok"] = "skipped_unconfigured"
+
+        if "youtube" in platforms and profile.publishing.youtube_shorts.enabled:
+            yt = YouTubeShortsPublisher(profile)
+            if yt.is_ready:
+                results["youtube_short_url"] = yt.publish_short(
+                    local_master,
+                    caption,
+                    title_hint=str(cut_dict.get("teaser_headline") or ""),
+                )
+            else:
+                results["youtube_shorts"] = "skipped_unconfigured"
 
         return results

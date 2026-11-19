@@ -38,11 +38,13 @@ async function verifyDiscordSignature(request, bodyText, publicKeyHex) {
 }
 
 const ACTION_LABELS = {
-  approve_both: "✅ Aprovado! Enviando para a Fila Espaçada (Instagram Reels + TikTok)...",
-  now_both: "⚡ Fura-fila acionado! Publicando AGORA no Reels + TikTok...",
+  approve_both: "✅ Aprovado! Enviando para a Fila Espaçada (Reels + TikTok + Shorts)...",
+  now_both: "⚡ Fura-fila acionado! Publicando AGORA em todas as redes ativas...",
   approve_reels: "📸 Aprovado para a Fila Espaçada (Somente Instagram Reels)...",
   approve_tiktok: "🎵 Aprovado! Enviando para a Fila Espaçada do TikTok...",
   now_tiktok: "⚡ Fura-fila acionado! Enviando AGORA para o TikTok...",
+  approve_youtube: "▶️ Aprovado! Enviando para a Fila Espaçada do YouTube Shorts...",
+  now_youtube: "⚡ Fura-fila acionado! Publicando AGORA no YouTube Shorts...",
   clean_audio: "🔇 Isolando voz e removendo música de fundo com IA (Demucs)... Um novo preview chegará em instantes!",
   reject: "🗑️ Corte descartado.",
 };

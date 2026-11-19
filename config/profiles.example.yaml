@@ -65,3 +65,8 @@ profiles:
         privacy_level: "PUBLIC_TO_EVERYONE"
         fallback_to_inbox: true
         access_token_env: "TIKTOK_ACCESS_TOKEN"
+      youtube_shorts:
+        enabled: false
+        privacy_status: "public"
+        category_id: "20"
+        token_json_env: "YOUTUBE_TOKEN_JSON"

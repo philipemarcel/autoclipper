@@ -591,11 +591,13 @@ def cmd_discord_action(
 
         # Ações de aprovação e publicação
         platform_map = {
-            "approve_both": (["instagram", "tiktok"], False),
-            "now_both": (["instagram", "tiktok"], True),
+            "approve_both": (["instagram", "tiktok", "youtube"], False),
+            "now_both": (["instagram", "tiktok", "youtube"], True),
             "approve_reels": (["instagram"], False),
             "approve_tiktok": (["tiktok"], False),
             "now_tiktok": (["tiktok"], True),
+            "approve_youtube": (["youtube"], False),
+            "now_youtube": (["youtube"], True),
         }
         if action not in platform_map:
             raise ValueError(f"Ação desconhecida recebida do Discord: {action}")

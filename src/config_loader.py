@@ -17,6 +17,7 @@ from src.models import (
     ProfileConfig,
     PublishingConfig,
     TikTokPublishConfig,
+    YouTubeShortsPublishConfig,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -42,6 +43,7 @@ def _parse_profiles_data(raw: Any, only_enabled: bool = True) -> List[ProfileCon
         pub_raw = item.get("publishing", {}) or {}
         ig_raw = pub_raw.get("instagram", {}) or {}
         tt_raw = pub_raw.get("tiktok", {}) or {}
+        yt_raw = pub_raw.get("youtube_shorts", {}) or {}
 
         twitch_login = str(item.get("twitch_login") or "").strip().lower()
         kick_list = [str(u).strip() for u in (item.get("kick_channels") or []) if str(u).strip()]
@@ -67,6 +69,7 @@ def _parse_profiles_data(raw: Any, only_enabled: bool = True) -> List[ProfileCon
                 drive_retention_days=int(pub_raw.get("drive_retention_days", 10)),
                 instagram=InstagramPublishConfig(**ig_raw),
                 tiktok=TikTokPublishConfig(**tt_raw),
+                youtube_shorts=YouTubeShortsPublishConfig(**yt_raw),
             ),
         )
         if not only_enabled or prof.enabled:

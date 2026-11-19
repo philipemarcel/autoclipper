@@ -1152,3 +1152,60 @@ def test_non_twitch_creator_name_does_not_leak_profile_alanzoka(tmp_path: Path, 
     DiscordNotifier(prof, bot_token="bot_x", channel_id="chan_x").send_cut_for_approval(rec, dummy_mp4)
     assert "Davy Jones" in captured["payload"]["content"]
     assert "Alanzoka" not in captured["payload"]["content"]
+
+
+def test_youtube_shorts_publisher_metadata_and_discord_buttons(tmp_path: Path, monkeypatch):
+    from src.approval.discord_notifier import DiscordNotifier
+    from src.publisher.youtube_shorts import YouTubeShortsPublisher
+
+    prof = _make_profile()
+    prof.publishing.youtube_shorts.enabled = True
+
+    empty_pub = YouTubeShortsPublisher(prof, token_json_str="")
+    assert empty_pub.is_ready is False
+
+    valid_tok = json.dumps({"token": "ya29.test", "refresh_token": "1//ref", "client_id": "cid", "client_secret": "csec"})
+    yt_pub = YouTubeShortsPublisher(prof, token_json_str=valid_tok)
+    assert yt_pub.is_ready is True
+
+    meta = yt_pub.build_video_metadata(
+        caption='ele mandou um "não tenho mões" no meio do desespero\n\n#davyjones #gtarp #cortesdegames',
+        title_hint="NAO TENHO MOES",
+    )
+    assert len(meta["snippet"]["title"]) <= 100
+    assert "#Shorts" in meta["snippet"]["title"]
+    assert "#Shorts" in meta["snippet"]["description"]
+    assert meta["snippet"]["categoryId"] == "20"
+    assert "davyjones" in meta["snippet"]["tags"]
+    assert "Shorts" in meta["snippet"]["tags"]
+    assert meta["status"]["privacyStatus"] == "public"
+
+    # Mock resumable upload via Google API
+    uploaded = {}
+
+    class FakeInsertReq:
+        def next_chunk(self):
+            return None, {"id": "ytShort123"}
+
+    class FakeVideos:
+        def insert(self, part=None, body=None, media_body=None):
+            uploaded["body"] = body
+            return FakeInsertReq()
+
+    class FakeService:
+        def videos(self):
+            return FakeVideos()
+
+    monkeypatch.setattr(yt_pub, "_build_youtube_service", lambda: FakeService())
+    dummy_mp4 = tmp_path / "short.mp4"
+    dummy_mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    url = yt_pub.publish_short(dummy_mp4, caption="clip brabo #cortes")
+    assert url == "https://youtube.com/shorts/ytShort123"
+    assert uploaded["body"]["snippet"]["categoryId"] == "20"
+
+    # Discord Row 1 com Reels + TikTok + Shorts cabe perfeitamente nos 5 botões da API do Discord
+    rows = DiscordNotifier._build_action_rows("cut_yt_1", drip_min=60, ig_enabled=True, tt_enabled=True, yt_enabled=True)
+    assert len(rows[0]["components"]) == 5
+    custom_ids = [b["custom_id"] for b in rows[0]["components"]]
+    assert "approve_both:cut_yt_1" in custom_ids
+    assert "approve_youtube:cut_yt_1" in custom_ids

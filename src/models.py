@@ -63,6 +63,14 @@ class TikTokPublishConfig:
 
 
 @dataclass
+class YouTubeShortsPublishConfig:
+    enabled: bool = False
+    privacy_status: str = "public"  # public | unlisted | private
+    category_id: str = "20"  # 20 = Gaming
+    token_json_env: str = "YOUTUBE_TOKEN_JSON"
+
+
+@dataclass
 class PublishingConfig:
     drip_interval_minutes: int = 75
     quiet_hours_brt: Optional[List[int]] = field(default_factory=lambda: [3, 9])
@@ -70,6 +78,7 @@ class PublishingConfig:
     drive_retention_days: int = 10
     instagram: InstagramPublishConfig = field(default_factory=InstagramPublishConfig)
     tiktok: TikTokPublishConfig = field(default_factory=TikTokPublishConfig)
+    youtube_shorts: YouTubeShortsPublishConfig = field(default_factory=YouTubeShortsPublishConfig)
 
 
 @dataclass
