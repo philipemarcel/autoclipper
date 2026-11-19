@@ -97,7 +97,7 @@ profiles:
 
       youtube_shorts:
         # Pausado temporariamente ate reconectar o canal correto com scripts/auth_youtube.py --save
-        enabled: false
+        enabled: true
         privacy_status: "public"
         category_id: "20"
         token_json_env: "YOUTUBE_TOKEN_JSON"
