@@ -14,7 +14,8 @@ from src.models import ProfileConfig
 logger = logging.getLogger(__name__)
 
 TIKTOK_API_BASE = "https://open.tiktokapis.com/v2"
-CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB por chunk
+# Documentação oficial TikTok v2: vídeos < 64 MB devem ir em 1 único chunk para evitar falha de remontagem
+CHUNK_SIZE = 60 * 1024 * 1024  # 60 MB por chunk
 
 
 class TikTokPublisher:
@@ -41,6 +42,29 @@ class TikTokPublisher:
         self.refresh_token = os.getenv("TIKTOK_REFRESH_TOKEN", "").strip()
         self.client_key = os.getenv("TIKTOK_CLIENT_KEY", "").strip()
         self.client_secret = os.getenv("TIKTOK_CLIENT_SECRET", "").strip()
+        self._creator_username: Optional[str] = None
+
+    def get_creator_username(self, token: str) -> str:
+        if self._creator_username is not None:
+            return self._creator_username
+        try:
+            resp = requests.post(
+                f"{TIKTOK_API_BASE}/post/publish/creator_info/query/",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json; charset=UTF-8",
+                },
+                json={},
+                timeout=12,
+            )
+            if resp.ok:
+                uname = str((resp.json().get("data") or {}).get("creator_username") or "").strip()
+                self._creator_username = uname
+                return uname
+        except Exception:
+            pass
+        self._creator_username = ""
+        return ""
 
     @property
     def is_ready(self) -> bool:
@@ -178,8 +202,11 @@ class TikTokPublisher:
                 if not inbox_resp.ok:
                     inbox_code = self._extract_error_code(inbox_resp)
                     if inbox_code == "spam_risk_too_many_pending_share":
+                        tok = headers.get("Authorization", "").replace("Bearer ", "").strip()
+                        uname = self.get_creator_username(tok) if tok else ""
+                        acct_hint = f" na conta @{uname}" if uname else ""
                         raise RuntimeError(
-                            "TikTok Inbox cheia (spam_risk_too_many_pending_share): publique ou apague os rascunhos pendentes na Caixa de Entrada do TikTok no celular."
+                            f"TikTok Inbox cheia{acct_hint} (spam_risk_too_many_pending_share): abra a Caixa de Entrada do TikTok no celular e publique ou apague os rascunhos pendentes."
                         )
                     raise RuntimeError(f"TikTok Inbox erro {inbox_resp.status_code}: {inbox_resp.text[:300]}")
                 return inbox_resp.json().get("data", {}), "inbox_fallback"
@@ -192,8 +219,11 @@ class TikTokPublisher:
         if not inbox_resp.ok:
             inbox_code = self._extract_error_code(inbox_resp)
             if inbox_code == "spam_risk_too_many_pending_share":
+                tok = headers.get("Authorization", "").replace("Bearer ", "").strip()
+                uname = self.get_creator_username(tok) if tok else ""
+                acct_hint = f" na conta @{uname}" if uname else ""
                 raise RuntimeError(
-                    "TikTok Inbox cheia (spam_risk_too_many_pending_share): publique ou apague os rascunhos pendentes na Caixa de Entrada do TikTok no celular."
+                    f"TikTok Inbox cheia{acct_hint} (spam_risk_too_many_pending_share): abra a Caixa de Entrada do TikTok no celular e publique ou apague os rascunhos pendentes."
                 )
             raise RuntimeError(f"TikTok Inbox erro {inbox_resp.status_code}: {inbox_resp.text[:300]}")
         return inbox_resp.json().get("data", {}), "inbox"

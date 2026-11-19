@@ -1732,3 +1732,86 @@ def test_instagram_reels_compute_best_thumb_offset_ms(tmp_path: Path):
     offset_ms = compute_best_thumb_offset_ms(mp4)
     assert offset_ms is not None
     assert 200 <= offset_ms <= 2600
+
+
+def test_tiktok_inbox_full_diagnostic_and_extended_rate_limit_retries(tmp_path: Path, monkeypatch):
+    from src.publisher.tiktok_poster import CHUNK_SIZE
+
+    assert CHUNK_SIZE == 60 * 1024 * 1024
+
+    class FakeResp:
+        def __init__(self, status_code: int, body: dict):
+            self.status_code = status_code
+            self._body = body
+            self.ok = 200 <= status_code < 300
+            self.text = json.dumps(body)
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise RuntimeError(f"HTTP {self.status_code}: {self.text}")
+
+    def fake_post(url, headers=None, json=None, data=None, timeout=30):
+        if url.endswith("/post/publish/video/init/"):
+            return FakeResp(403, {"error": {"code": "unaudited_client_can_only_post_to_private_accounts"}})
+        if url.endswith("/post/publish/inbox/video/init/"):
+            return FakeResp(403, {"error": {"code": "spam_risk_too_many_pending_share"}})
+        if url.endswith("/post/publish/creator_info/query/"):
+            return FakeResp(200, {"data": {"creator_username": "phiuphiufiu"}})
+        return FakeResp(404, {})
+
+    monkeypatch.setattr("src.publisher.tiktok_poster.requests.post", fake_post)
+
+    prof = _make_profile()
+    prof.publishing.tiktok = TikTokPublishConfig(
+        enabled=True,
+        mode="direct",
+        privacy_level="SELF_ONLY",
+        fallback_to_inbox=True,
+    )
+    video = tmp_path / "tt_test.mp4"
+    video.write_bytes(b"\x00" * 2048)
+
+    pub = TikTokPublisher(prof, access_token="tok_xyz")
+    with pytest.raises(RuntimeError) as exc_info:
+        pub.publish_video(video, "clip teste #cortes")
+    assert "@phiuphiufiu" in str(exc_info.value)
+    assert "spam_risk_too_many_pending_share" in str(exc_info.value)
+
+    # DripScheduler deve manter retry em `pending` mesmo no 4º retry quando erro for limite de Inbox cheia
+    monkeypatch.setenv("TIKTOK_ACCESS_TOKEN", "tok_xyz")
+    monkeypatch.setenv("TIKTOK_REFRESH_TOKEN", "")
+    store = DriveStore(fallback_local_dir=tmp_path / "drive_tt_retry")
+    prof.publishing.instagram.enabled = False
+    prof.publishing.facebook.enabled = False
+    prof.publishing.youtube_shorts.enabled = False
+    mid, _ = store.upload_file(video, ["cortes", "criador_01", "tt_retry_1"], "master_1080p60.mp4")
+    processed_state = {"cuts": [{"cut_id": "tt_retry_1", "profile_id": prof.id, "caption": "teste", "master_file_id": mid}]}
+    now = datetime(2026, 11, 19, 16, 40, 0, tzinfo=timezone.utc)
+    store.save_state_json(
+        "drip_queue.json",
+        {
+            "last_published_by_profile": {},
+            "items": [
+                {
+                    "cut_id": "tt_retry_1",
+                    "profile_id": prof.id,
+                    "platforms": ["tiktok"],
+                    "scheduled_for": "2026-11-19T16:30:00Z",
+                    "status": "pending",
+                    "retry_count": 3,
+                }
+            ],
+        },
+    )
+
+    scheduler = DripScheduler(store)
+    scheduler.process_due_queue({prof.id: prof}, processed_state, tmp_path / "work_tt", now_utc=now)
+    st = store.load_state_json("drip_queue.json", {})
+    it = st["items"][0]
+    assert it["status"] == "pending"
+    assert it["retry_count"] == 4
+    assert "@phiuphiufiu" in it["last_error"]
+    assert it["scheduled_for"] == "2026-11-19T18:40:00Z"

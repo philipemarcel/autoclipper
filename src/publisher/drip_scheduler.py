@@ -499,16 +499,17 @@ class DripScheduler:
                     item["platforms"] = failed_plats
                     item["platform_errors"] = plat_errors
                     item["last_error"] = "; ".join(f"{k}: {v}" for k, v in plat_errors.items())[:500]
+                    is_rate_limit = any(
+                        code in err
+                        for err in plat_errors.values()
+                        for code in ("spam_risk_too_many_pending_share", "quotaExceeded", "uploadLimitExceeded")
+                    )
                     retry_count = int(item.get("retry_count", 0)) + 1
                     item["retry_count"] = retry_count
-                    if retry_count >= 3:
+                    max_retries = 12 if is_rate_limit else 3
+                    if retry_count >= max_retries:
                         item["status"] = "failed"
                     else:
-                        is_rate_limit = any(
-                            code in err
-                            for err in plat_errors.values()
-                            for code in ("spam_risk_too_many_pending_share", "quotaExceeded", "uploadLimitExceeded")
-                        )
                         delay_min = 120 if is_rate_limit else 30
                         item["scheduled_for"] = _to_iso_utc(now + timedelta(minutes=delay_min))
                     logger.warning(
