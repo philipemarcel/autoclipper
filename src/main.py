@@ -196,44 +196,32 @@ def process_single_cluster(
         meta_path.write_text(json.dumps(meta_dict, ensure_ascii=False, indent=2), encoding="utf-8")
         store.upload_file(meta_path, drive_parts, "metadata.json")
 
-        # 8. Envia prévia (<9 MB) no Discord e aplica Auto-Postagem nas plataformas aprovadas pela moderação
+        # 8. Aplica Auto-Postagem nas plataformas aprovadas pela moderação e já mostra o status direto no card do Discord
         notifier = DiscordNotifier(profile)
         scheduler = DripScheduler(store)
         active_drip_min = scheduler.get_effective_interval_minutes(profile)
+
+        auto_publish_safe = os.getenv("AUTO_PUBLISH_SAFE", "true").strip().lower() not in ("0", "false", "no")
+        outcome: Optional[Dict[str, Any]] = None
+        if auto_publish_safe and enabled_platforms and moderation.allowed_platforms:
+            outcome = scheduler.enqueue_or_publish_cut(
+                profile=profile,
+                cut_dict=meta_dict,
+                platforms=moderation.allowed_platforms,
+                work_dir=cut_work_dir,
+                force_immediate=False,
+            )
+            meta_dict["auto_publish_outcome"] = outcome
+
         msg_id = notifier.send_cut_for_approval(
             record,
             rendered.discord_preview_mp4,
             drip_interval_override=active_drip_min,
+            moderation_info=moderation.to_dict(),
+            auto_queue_outcome=outcome,
         )
         record.discord_message_id = msg_id
         meta_dict["discord_message_id"] = msg_id
-
-        auto_publish_safe = os.getenv("AUTO_PUBLISH_SAFE", "true").strip().lower() not in ("0", "false", "no")
-        if auto_publish_safe and enabled_platforms:
-            if moderation.allowed_platforms:
-                outcome = scheduler.enqueue_or_publish_cut(
-                    profile=profile,
-                    cut_dict=meta_dict,
-                    platforms=moderation.allowed_platforms,
-                    work_dir=cut_work_dir,
-                    force_immediate=False,
-                )
-                meta_dict["auto_publish_outcome"] = outcome
-                if moderation.blocked_platforms:
-                    notifier.post_status_reply(
-                        msg_id,
-                        f"🤖 **Auto-Postagem por Plataforma (`{moderation.exposure_level}`)**: enviado/enfileirado automaticamente em `{', '.join(moderation.allowed_platforms)}` e filtrado de `{', '.join(moderation.blocked_platforms)}` ({moderation.reason}).",
-                    )
-                else:
-                    notifier.post_status_reply(
-                        msg_id,
-                        f"🤖 **Auto-Postagem Aprovada (`{moderation.exposure_level}`)**: enviado/enfileirado automaticamente em `{', '.join(moderation.allowed_platforms)}`.",
-                    )
-            else:
-                notifier.post_status_reply(
-                    msg_id,
-                    f"🚫 **Retido pela Moderação Automática (`{moderation.exposure_level}`)**: bloqueado em todas as plataformas ({moderation.reason}). Use os botões acima apenas se quiser aprovar manualmente.",
-                )
 
         # 9. Salva imediatamente no estado global para evitar duplicação
         processed_state.setdefault("cuts", []).append(meta_dict)

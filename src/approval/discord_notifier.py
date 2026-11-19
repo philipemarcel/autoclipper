@@ -61,6 +61,8 @@ class DiscordNotifier:
         cut: CutRecord,
         preview_video_path: Path,
         drip_interval_override: Optional[int] = None,
+        moderation_info: Optional[Dict[str, Any]] = None,
+        auto_queue_outcome: Optional[Dict[str, Any]] = None,
     ) -> str:
         if not self.is_configured:
             logger.warning("Discord não configurado (BOT_TOKEN/CHANNEL_ID ou RELAY ausentes). Pulando envio.")
@@ -97,10 +99,66 @@ class DiscordNotifier:
             else self.profile.publishing.drip_interval_minutes
         )
 
-        embed = {
-            "title": f"{mode_badge} • @{cut.twitch_login} (Score {cut.score:.0f})",
-            "color": 0x9146FF if not cut.audio_cleaned else 0x00D26A,
-            "fields": [
+        embed_color = 0x9146FF if not cut.audio_cleaned else 0x00D26A
+        auto_status_header = ""
+        moderation_field: Optional[Dict[str, Any]] = None
+
+        if moderation_info is not None:
+            level = str(moderation_info.get("exposure_level") or "clean")
+            allowed = list(moderation_info.get("allowed_platforms") or [])
+            blocked = list(moderation_info.get("blocked_platforms") or [])
+            reason = str(moderation_info.get("reason") or "Sem conteúdo impróprio detectado.")
+            mode = str((auto_queue_outcome or {}).get("mode") or "")
+            sched_local = str(
+                (auto_queue_outcome or {}).get("scheduled_local")
+                or (auto_queue_outcome or {}).get("scheduled_for")
+                or ""
+            )
+
+            plat_names = {
+                "instagram": "Instagram Reels",
+                "youtube_shorts": "YouTube Shorts",
+                "youtube": "YouTube Shorts",
+                "tiktok": "TikTok",
+            }
+            allowed_labels = ", ".join(plat_names.get(p, p) for p in allowed) or "Nenhuma"
+            blocked_labels = ", ".join(plat_names.get(p, p) for p in blocked)
+
+            if allowed and auto_queue_outcome:
+                if mode == "published_now":
+                    queue_line = f"⚡ **JÁ PUBLICADO AUTOMATICAMENTE AGORA** em: `{allowed_labels}`"
+                    auto_status_header = f"✅ **JÁ PUBLICADO AUTOMATICAMENTE** ({allowed_labels}) — aprovado sem conteúdo impróprio!"
+                else:
+                    when_str = f" para `{sched_local}`" if sched_local else ""
+                    queue_line = f"✅ **JÁ FOI AUTOMATICAMENTE PARA A FILA**{when_str} em: `{allowed_labels}`"
+                    auto_status_header = f"✅ **JÁ ENTROU AUTOMATICAMENTE NA FILA**{when_str} ({allowed_labels}) por não apresentar conteúdo impróprio!"
+
+                if blocked:
+                    embed_color = 0xF59E0B
+                    level_line = f"🟡 **Filtro por Plataforma (`{level}`)**: liberado em `{allowed_labels}` | retido em `{blocked_labels}`"
+                else:
+                    embed_color = 0x00D26A
+                    level_line = "🟢 **Aprovado na Moderação**: nenhum conteúdo impróprio detectado"
+            elif not allowed:
+                embed_color = 0xEF4444
+                queue_line = "🚫 **NÃO ENTROU NA FILA AUTOMATICAMENTE** (retido em todas as plataformas)"
+                level_line = f"🔴 **Retido pela Moderação (`{level}`)**: possível conteúdo impróprio"
+                auto_status_header = "🚫 **RETIDO PELA MODERAÇÃO AUTOMÁTICA** — não foi para a fila (use os botões abaixo apenas se quiser aprovar manualmente):"
+            else:
+                queue_line = f"⏳ Aguardando fila (`{allowed_labels}`)"
+                level_line = f"🟢 Moderação: `{level}`"
+
+            moderation_field = {
+                "name": "🛡️ Status na Fila & Moderação Automática",
+                "value": f"{queue_line}\n{level_line}\n💬 *Análise: {reason}*",
+                "inline": False,
+            }
+
+        embed_fields: List[Dict[str, Any]] = []
+        if moderation_field is not None:
+            embed_fields.append(moderation_field)
+        embed_fields.extend(
+            [
                 {
                     "name": "📝 Copy pronta (Reels / TikTok)",
                     "value": f"```\n{cut.caption}\n```",
@@ -129,7 +187,13 @@ class DiscordNotifier:
                     ),
                     "inline": False,
                 },
-            ],
+            ]
+        )
+
+        embed = {
+            "title": f"{mode_badge} • @{cut.twitch_login} (Score {cut.score:.0f})",
+            "color": embed_color,
+            "fields": embed_fields,
             "footer": {"text": f"ID: {cut.cut_id} • Fonte: {cut.source_type}"},
         }
 
@@ -145,8 +209,10 @@ class DiscordNotifier:
             cut.creator_name.strip()
             or (f"@{cut.twitch_login}" if cut.twitch_login else self.profile.display_name)
         )
+        default_header = f"**Novo corte pronto de `{creator_label}`!** Assista à prévia abaixo e aprove com 1 clique:"
+        content_header = f"**Novo corte de `{creator_label}`!** {auto_status_header}" if auto_status_header else default_header
         payload_json = {
-            "content": f"**Novo corte pronto de `{creator_label}`!** Assista à prévia abaixo e aprove com 1 clique:",
+            "content": content_header,
             "embeds": [embed],
             "components": components,
         }
