@@ -247,11 +247,11 @@ DADOS DO MOMENTO ({platform_label}):
 TRANSCRIÇÃO COM TIMESTAMPS:
 {transcript_block}
 
-REGRAS OBRIGATÓRIAS DE EDIÇÃO:
+REGRAS OBRIGATÓRIAS DE EDIÇÃO (OTIMIZADAS PARA REELS/SHORTS/TIKTOK — RETENÇÃO + ENVIO NO DIRECT):
 1. CORTE PRINCIPAL (`main_start` e `main_end`):
    - {"Use o vídeo bruto acima como BUFFER DE CONTEXTO para encontrar o INÍCIO REAL da conversa/situação (antes do clímax) e o DESFECHO COMPLETO após a reação." if is_external_stream else "Remova silêncios, enrolação ou fim de assuntos anteriores."}
-   - Comece exatamente na frase de contexto/gancho que prepara o momento (`main_start`) e termine só após toda a reação/risada/desfecho final (`main_end` — deixe sempre +1.5s a +3s de respiro após a última fala).
-   - {"NÃO comece o corte no meio de uma frase ou já com o assunto terminando; e se o assunto mudar para leitura de chat/doações ou caminhada sem relação, ENCERRE `main_end` antes dessa quebra (melhor 30–50s coesos do que 60s com assunto desconexo!)." if is_external_stream else ""}
+   - **Regra dos 3s iniciais (Watch Time no Reels):** NUNCA comece `main_start` com silêncio ou tempo morto! Entre direto na frase/ação de gancho que segura a pessoa nos primeiros 2 a 3 segundos, e encerre `main_end` logo após toda a reação/risada/desfecho (+1.2s a +2.2s de respiro, sem sobra morta no final para favorecer replays/loops).
+   - {"NÃO comece o corte no meio de uma frase ou já com o assunto terminando; e se o assunto mudar para leitura de chat/doações ou caminhada sem relação, ENCERRE `main_end` antes dessa quebra (melhor 25–48s dinâmicos e completos do que 60s com queda de retenção!)." if is_external_stream else ""}
    - {"ATENÇÃO (Clipe Kick 66s–115s): o clipe original tem " + f"{raw_duration_sec:.1f}s" + " e normalmente termina na reação principal! Prefira encerrar perto de ~" + f"{raw_duration_sec:.1f}s" + " aproveitando 45s–" + f"{edt.max_duration_seconds:.0f}s" + "." if cluster.mode == "kick_clip" and max(65.0, edt.max_duration_seconds) < raw_duration_sec <= 115.0 else ""}
    - {"ATENÇÃO (Clipe Kick longo > 115s): este arquivo de " + f"{raw_duration_sec:.0f}s" + " pode ter mais de uma cena ou espera longa! Analise do início (0s) ao fim e selecione a CENA MAIS ENGRAÇADA/FORTE completa (35s–" + f"{edt.max_duration_seconds:.0f}s" + "), começando na preparação e terminando só depois do clímax/reação (evite escolher trechos mortos entre cenas!)." if cluster.mode == "kick_clip" and raw_duration_sec > 115.0 else ""}
    - A soma final (`teaser` + `corte principal`) NUNCA pode passar de {edt.max_duration_seconds:.1f} segundos.
@@ -262,8 +262,8 @@ REGRAS OBRIGATÓRIAS DE EDIÇÃO:
    - Baseie-se LITERALMENTE no título/assunto do momento (`{cluster.dominant_title}`) ou na frase mais engraçada dita na transcrição.
    - PROIBIDO usar clichês genéricos de IA como "JOGADA DE OURO", "MOMENTO ÉPICO", "IMPERDÍVEL", "INACREDITÁVEL".
 4. LEGENDA NATURAL + SEO BASEADA NO QUE O STREAMER FALOU (`caption_text` e `hashtags`):
-   - `caption_text`: **1 única linha curta em caixa baixa** (soando 100% humana, como alguém escrevendo a legenda de uma página real de cortes), baseada **no assunto, descoberta ou reação que o streamer falou na `TRANSCRIÇÃO COM TIMESTAMPS`** entre `main_start` e `main_end`.
-   - Varie a forma de escrever naturalmente com palavras-chave do jogo/criador (bom para busca no TikTok, Reels e Shorts):
+   - `caption_text`: **1 única linha curta em caixa baixa** (<= 95 caracteres ideais antes do "... mais" no Instagram Reels, soando 100% humana), baseada **no assunto, descoberta ou reação que o streamer falou na `TRANSCRIÇÃO COM TIMESTAMPS`** entre `main_start` e `main_end`.
+   - Priorize clareza e palavras-chave reais pesquisáveis (criador, jogo e ação — otimiza Busca do Instagram Reels e gera compartilhamentos no Direct / Sends per Reach):
      * `"o jogo tem até golfinho agora"`
      * `"{creator_handle} impressionado com os golfinhos no jogo"`
      * `"ele descobrindo staff da twitch no chat"`

@@ -72,8 +72,8 @@ profiles:
     publishing:
       # Fila Espaçada Inteligente: 1 post a cada 75 min (1h15) para não canibalizar alcance com 8-15 cortes
       drip_interval_minutes: 75
-      # Horário de silêncio opcional na madrugada (BRT): evita queimar posts entre 03h e 09h (exceto botão "Postar Agora")
-      quiet_hours_brt: [3, 9]
+      # Horário de silêncio na madrugada + manhã fraca (BRT): publica a partir das 10:05 BRT nos horários de maior pico do Reels
+      quiet_hours_brt: [0, 10]
       timezone: "America/Sao_Paulo"
       # Exclui automaticamente os arquivos de vídeo do Google Drive após N dias (preservando histórico contra repetição)
       drive_retention_days: 10
@@ -82,6 +82,8 @@ profiles:
         enabled: true
         account_id_env: "IG_ACCOUNT_ID"
         access_token_env: "IG_ACCESS_TOKEN"
+        share_to_feed: true
+        trial_mode: ""  # Opcional: "SS_PERFORMANCE" para testar Trial Reels automático para não-seguidores
 
       facebook:
         enabled: true

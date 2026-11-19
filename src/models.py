@@ -51,6 +51,8 @@ class InstagramPublishConfig:
     enabled: bool = True
     account_id_env: str = "IG_ACCOUNT_ID"
     access_token_env: str = "IG_ACCESS_TOKEN"
+    share_to_feed: bool = True
+    trial_mode: str = ""  # "" | "SS_PERFORMANCE" | "MANUAL"
 
 
 @dataclass

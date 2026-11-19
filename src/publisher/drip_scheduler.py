@@ -32,6 +32,7 @@ _DEDUP_ITEM_KEYS = (
     "teaser_headline",
     "twitch_login",
     "creator_name",
+    "game_name",
     "stream_key",
     "video_id",
     "vod_anchor_sec",
@@ -589,7 +590,14 @@ class DripScheduler:
                                     cut_dict["download_url"] = video_url
                             except Exception:
                                 pass
-                        results["instagram_reel_id"] = ig.publish_reel(local_master, caption, video_url=video_url)
+                        results["instagram_reel_id"] = ig.publish_reel(
+                            local_master,
+                            caption,
+                            video_url=video_url,
+                            title_hint=str(cut_dict.get("teaser_headline") or cut_dict.get("dominant_title") or ""),
+                            creator_name=str(cut_dict.get("creator_name") or ""),
+                            game_name=str(cut_dict.get("game_name") or ""),
+                        )
                     else:
                         results["instagram"] = "skipped_unconfigured"
                 except Exception as exc:

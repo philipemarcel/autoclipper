@@ -1621,3 +1621,114 @@ def test_drip_scheduler_blocks_duplicate_cut_across_ids(tmp_path: Path):
     )
     assert second_outcome["mode"] == "skipped_duplicate"
     assert second_outcome["matched_cut_id"] == "cut_a"
+
+
+def test_instagram_reels_seo_sends_cta_thumb_and_niche_hashtags(tmp_path: Path, monkeypatch):
+    from src.publisher.instagram_reels import InstagramReelsPublisher
+
+    prof = _make_profile()
+    prof.publishing.instagram.enabled = True
+    ig = InstagramReelsPublisher(prof, account_id="178414999", access_token="EAA_valid_meta_tok")
+
+    meta = ig.build_reels_metadata(
+        caption="ele descobriu o segredo escondido no mapa! O que vocês acharam? #fyp #viral #Shorts #cortes #gtav",
+        title_hint="SEGREDO NO MAPA",
+        creator_name="Davy Jones",
+        game_name="Grand Theft Auto VI",
+    )
+    assert len(meta["hook_line"]) <= 98
+    assert "O que vocês acharam" not in meta["hook_line"]
+    assert 3 <= len(meta["hashtags"]) <= 5
+    assert "#fyp" not in meta["hashtags"]
+    assert "#viral" not in meta["hashtags"]
+    assert "#shorts" not in meta["hashtags"]
+    assert "#davyjones" in meta["hashtags"]
+    assert any(k in meta["engagement_line"].lower() for k in ("manda ", "envia ", "salva "))
+    assert "Davy Jones" in meta["engagement_line"]
+
+    # Testa envio de container com thumb_offset, audio_name, share_to_feed, trial_params e fallback em 400
+    calls = []
+
+    class FakeResp:
+        def __init__(self, payload, ok=True, status_code=200, text="{}"):
+            self._payload = payload
+            self.ok = ok
+            self.status_code = status_code
+            self.text = text
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise RuntimeError(f"HTTP {self.status_code}: {self.text}")
+
+        def json(self):
+            return self._payload
+
+    container_attempts = 0
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        nonlocal container_attempts
+        calls.append((url, dict(data) if isinstance(data, dict) else data, dict(headers or {})))
+        if url.endswith("/media"):
+            container_attempts += 1
+            if container_attempts == 1:
+                assert (data or {}).get("thumb_offset") == "2200"
+                assert (data or {}).get("audio_name") == "Som original - Davy Jones"
+                assert (data or {}).get("share_to_feed") == "true"
+                assert "SS_PERFORMANCE" in str((data or {}).get("trial_params") or "")
+                # Simula conta sem Trial Reels -> fallback mantém thumb_offset no 2º init!
+                return FakeResp({}, ok=False, status_code=400, text="trial_params unsupported")
+            if container_attempts == 2:
+                assert (data or {}).get("thumb_offset") == "2200"
+                assert "trial_params" not in (data or {})
+                return FakeResp({"id": "cont_ig_77", "uri": "https://rupload.facebook.com/ig-api-upload/v21.0/cont_ig_77"})
+        if "rupload.facebook.com" in url:
+            return FakeResp({"success": True})
+        if url.endswith("/media_publish"):
+            return FakeResp({"id": "reel_pub_77"})
+        return FakeResp({"success": True})
+
+    def fake_get(url, params=None, timeout=None):
+        return FakeResp({"status_code": "FINISHED"})
+
+    monkeypatch.setattr("src.publisher.instagram_reels.requests.post", fake_post)
+    monkeypatch.setattr("src.publisher.instagram_reels.requests.get", fake_get)
+
+    dummy_mp4 = tmp_path / "reel_opt.mp4"
+    dummy_mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    media_id = ig.publish_reel(
+        dummy_mp4,
+        caption="ele reagindo ao bug insano #fyp #gta6 #cortes",
+        creator_name="Davy Jones",
+        game_name="GTA 6",
+        thumb_offset_ms=2200,
+        trial_mode="SS_PERFORMANCE",
+    )
+    assert media_id == "reel_pub_77"
+    assert container_attempts == 2
+
+
+@pytest.mark.skipif(shutil.which(get_ffmpeg_bin()) is None and not Path(get_ffmpeg_bin()).exists(), reason="FFmpeg indisponível")
+def test_instagram_reels_compute_best_thumb_offset_ms(tmp_path: Path):
+    from src.publisher.instagram_reels import compute_best_thumb_offset_ms
+
+    mp4 = tmp_path / "sample_thumb.mp4"
+    subprocess.run(
+        [
+            get_ffmpeg_bin(),
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=3:size=320x568:rate=30",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(mp4),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    offset_ms = compute_best_thumb_offset_ms(mp4)
+    assert offset_ms is not None
+    assert 200 <= offset_ms <= 2600

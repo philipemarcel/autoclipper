@@ -247,6 +247,7 @@ def process_single_cluster(
         if cluster.best_clip.created_at:
             meta_dict["clip_created_at"] = cluster.best_clip.created_at
         meta_dict["dominant_title"] = str(cluster.dominant_title or "").strip()
+        meta_dict["game_name"] = str(cluster.game_name or "").strip()
         meta_dict["transcript_snippet"] = transcript_snippet
 
         # 7.5. Moderação automática visual + áudio por plataforma (Instagram vs YouTube Shorts vs TikTok vs Facebook)
