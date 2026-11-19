@@ -287,6 +287,8 @@ class DripScheduler:
                 continue
 
             try:
+                if item.get("caption"):
+                    cut_dict["caption"] = str(item["caption"])
                 res = self._execute_publish(prof, cut_dict, item["platforms"], work_dir)
                 item["status"] = "published"
                 item["published_at"] = _to_iso_utc(now)
@@ -339,7 +341,7 @@ class DripScheduler:
             else:
                 results["tiktok"] = "skipped_unconfigured"
 
-        if "youtube" in platforms and profile.publishing.youtube_shorts.enabled:
+        if ("youtube" in platforms or "youtube_shorts" in platforms) and profile.publishing.youtube_shorts.enabled:
             yt = YouTubeShortsPublisher(profile)
             if yt.is_ready:
                 results["youtube_short_url"] = yt.publish_short(

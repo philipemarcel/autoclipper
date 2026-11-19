@@ -215,6 +215,7 @@ def process_single_cluster(
                     profile=profile,
                     cut_dict=meta_dict,
                     platforms=moderation.allowed_platforms,
+                    work_dir=cut_work_dir,
                     force_immediate=False,
                 )
                 meta_dict["auto_publish_outcome"] = outcome
