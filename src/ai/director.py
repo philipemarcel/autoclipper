@@ -39,6 +39,52 @@ def build_transcript_lines(words: List[WordTimestamp], chunk_sec: float = 4.0) -
     return "\n".join(lines)
 
 
+def extract_spoken_quote_fallback(
+    words: List[WordTimestamp],
+    start_sec: float,
+    end_sec: float,
+    peak_hint_sec: float,
+) -> str:
+    """Extrai a fala mais marcante/completa dita pelo streamer dentro da janela cortada."""
+    in_window = [w for w in words if (start_sec - 0.5) <= w.start <= (end_sec + 0.5) and w.word.strip()]
+    if not in_window:
+        return ""
+
+    clauses: List[List[WordTimestamp]] = []
+    bucket: List[WordTimestamp] = [in_window[0]]
+    for w in in_window[1:]:
+        prev_txt = bucket[-1].word.strip()
+        gap = w.start - bucket[-1].end
+        if gap > 0.48 or prev_txt.endswith((".", "!", "?")) or len(bucket) >= 11:
+            clauses.append(bucket)
+            bucket = [w]
+        else:
+            bucket.append(w)
+    if bucket:
+        clauses.append(bucket)
+
+    best_text = ""
+    best_score = -1.0
+    for cl in clauses:
+        raw_txt = " ".join(x.word.strip() for x in cl).strip()
+        clean_txt = re.sub(r"\s+", " ", raw_txt).strip(' "\'.,;:')
+        if len(clean_txt) < 12 or len(cl) < 3:
+            continue
+        mid = (cl[0].start + cl[-1].end) / 2.0
+        prox = 1.0 / (1.0 + abs(mid - peak_hint_sec) / 8.0)
+        length_bonus = 1.2 if 4 <= len(cl) <= 9 else 0.7
+        expressive_bonus = 0.8 if any(tok in raw_txt.lower() for tok in ("!", "?", "kkk", "haha", "mano", "cara", "meu", "não", "nunca")) else 0.0
+        score = prox * 2.0 + length_bonus + expressive_bonus
+        if score > best_score:
+            best_score = score
+            best_text = clean_txt.lower()
+
+    if len(best_text) > 95:
+        cut_pos = best_text.rfind(" ", 0, 92)
+        best_text = best_text[: (cut_pos if cut_pos > 30 else 92)].rstrip(" ,;:") + "..."
+    return best_text
+
+
 class GeminiDirector:
     """
     Diretor de Edição via Gemini:
@@ -208,10 +254,11 @@ REGRAS OBRIGATÓRIAS DE EDIÇÃO:
    - Máximo 4 a 5 palavras curtas que aparecem na tela nos 2-3s iniciais.
    - Baseie-se LITERALMENTE no título/assunto do momento (`{cluster.dominant_title}`) ou na frase mais engraçada dita na transcrição.
    - PROIBIDO usar clichês genéricos de IA como "JOGADA DE OURO", "MOMENTO ÉPICO", "IMPERDÍVEL", "INACREDITÁVEL".
-4. COPY DE PÁGINA DE CORTES BR (`caption_text` e `hashtags`):
-   - `caption_text`: 1 única linha curta em caixa baixa, exatamente como páginas reais brasileiras de cortes escrevem no TikTok/Reels.
-   - Use o próprio título/assunto do momento (`{cluster.dominant_title}`) do criador `{creator_name}` adaptado de forma natural OU cite a reação/fala literal do criador no vídeo (ex: "ele reclamando dos 30 fps no primeiro minuto de jogo kkkkk", "o primeiro roubo em vice city já deu tudo errado 💀").
-   - PROIBIDO usar frases artificiais de IA como "galera surtando", "segura essa", "deixou todo mundo de cara", "o que acharam?".
+4. LEGENDA DA POSTAGEM BASEADA NO QUE O STREAMER FALOU (`caption_text` e `hashtags`):
+   - `caption_text`: **1 única linha curta em caixa baixa**, estilo página real de cortes no TikTok/Reels, **SEMPRE ligada ao que o streamer realmente falou na `TRANSCRIÇÃO COM TIMESTAMPS`** dentro do trecho cortado (`main_start` até `main_end`).
+   - Leia as falas com atenção e pesque a **pérola, gafe, desculpa ou frase mais engraçada/marcante dita pelo criador**: cite a frase entre aspas ou faça uma legenda curta em cima exatamente do que ele falou (ex: `ele simplesmente mandou um "<frase literal engraçada da transcrição>" kkkkk`, `<frase marcante dita no clipe> 💀`).
+   - Só use o título do clipe (`{cluster.dominant_title}`) se não houver fala clara na transcrição (`"(Sem falas detectadas)"`).
+   - PROIBIDO inventar fala fora da transcrição, mandar comentário aleatório sem relação com o vídeo, ou usar frases artificiais de IA como "galera surtando", "segura essa", "deixou todo mundo de cara", "o que acharam?".
    - `hashtags`: compare diretamente com "HASHTAGS MAIS USADAS EM CLIPS DE JOGOS VIRAIS NA WEB" e "Buscas reais em alta" acima, escolhendo de 4 a {self.profile.copy.max_hashtags} hashtags combinando:
      1) criador (`#{creator_handle}`),
      2) jogo/assunto em alta na web agora (ex: `#gta6`, `#gtarp`, `#cs2`, ou termo buscado acima se bater com a cena),
@@ -375,9 +422,12 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             else:
                 main_end = main_start + allowed_main
 
-        # Limpeza da copy minimalista (remove chamadas robóticas e interrogações forçadas)
-        caption = str(raw.get("caption_text") or cluster_fallback_caption(self.profile)).strip()
-        caption = re.sub(r"\s+", " ", caption)
+        # Limpeza da copy minimalista + fallback automático para uma fala real dentro do corte se vier vazia/genérica
+        spoken_fallback = extract_spoken_quote_fallback(words, main_start, main_end, peak_hint_sec)
+        raw_cap = str(raw.get("caption_text") or "").strip()
+        if not raw_cap or raw_cap.lower().startswith("momento absurdo na live"):
+            raw_cap = spoken_fallback or cluster_fallback_caption(self.profile)
+        caption = re.sub(r"\s+", " ", raw_cap).strip()
         caption = re.sub(
             r"\s*(?:o que (?:vocês|vcs) acharam\??|comenta aí!?|compartilha com os amigos!?)\s*$",
             "",
@@ -446,6 +496,8 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
             t_start, t_end = 0.0, 0.0
 
         title_clean = (cluster.dominant_title or "simplesmente intancável esse momento").strip()
+        spoken_quote = extract_spoken_quote_fallback(words, start, end, peak_hint_sec)
+        fallback_caption = f'"{spoken_quote}"' if spoken_quote else title_clean.lower()
         transcript_hint = " ".join(w.word for w in words[:40])
         tags = suggest_dynamic_hashtags(
             creator_handle=cluster.broadcaster_login or self.profile.twitch_login,
@@ -464,8 +516,8 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
                 "cold_open_enabled": cold_open,
                 "teaser_start": t_start,
                 "teaser_end": t_end,
-                "teaser_headline": title_clean.upper()[:42] if cold_open else "",
-                "caption_text": title_clean.lower(),
+                "teaser_headline": (spoken_quote or title_clean).upper()[:42] if cold_open else "",
+                "caption_text": fallback_caption,
                 "hashtags": tags[: self.profile.copy.max_hashtags],
                 "virality_score": int(min(95, max(60, cluster.score))),
                 "reasoning": "Fallback centrado no pico de clipes da comunidade.",

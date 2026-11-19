@@ -807,13 +807,25 @@ def test_dynamic_trending_hashtags_and_director_prompt(monkeypatch):
     assert "kscerato" in prompt
     assert "Google Trends tempo real" in prompt
     assert "#cortesdegames" in prompt
-    assert "COPY DE PÁGINA DE CORTES BR" in prompt
+    assert "LEGENDA DA POSTAGEM BASEADA NO QUE O STREAMER FALOU" in prompt
     assert "1 única linha curta em caixa baixa" in prompt
+    assert "PROIBIDO inventar fala fora da transcrição" in prompt
     assert "REFERÊNCIAS REAIS DE LEGENDAS DE CLIPS DE JOGOS NA WEB" not in prompt
 
-    # Fallback volta ao título em caixa baixa no modelo inicial minimalista
+    # Sem falas claras (<3 palavras), fallback usa título em caixa baixa
     fb_dec = director.direct_cut(cl, [WordTimestamp("bora", 1.0, 1.5)], 40.0, 20.0)
     assert fb_dec.caption_text == "kscerato"
+
+    # Com fala marcante perto do pico, fallback extrai citação real do streamer
+    spoken_words = [
+        WordTimestamp("cara", 17.0, 17.3),
+        WordTimestamp("eu", 17.3, 17.5),
+        WordTimestamp("não", 17.5, 17.7),
+        WordTimestamp("tenho", 17.7, 18.0),
+        WordTimestamp("mões!", 18.0, 18.4),
+    ]
+    fb_spoken = director.direct_cut(cl, spoken_words, 40.0, 18.0)
+    assert "não tenho mões" in fb_spoken.caption_text
 
     # Garante limpeza de perguntas forçadas no modelo minimalista
     dec = director.enforce_constraints(
