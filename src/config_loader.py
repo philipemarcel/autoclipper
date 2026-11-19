@@ -13,6 +13,7 @@ from src.models import (
     DetectionConfig,
     DiscordProfileConfig,
     EditingConfig,
+    FacebookPublishConfig,
     InstagramPublishConfig,
     ProfileConfig,
     PublishingConfig,
@@ -42,6 +43,7 @@ def _parse_profiles_data(raw: Any, only_enabled: bool = True) -> List[ProfileCon
         dsc_raw = item.get("discord", {}) or {}
         pub_raw = item.get("publishing", {}) or {}
         ig_raw = pub_raw.get("instagram", {}) or {}
+        fb_raw = pub_raw.get("facebook", {}) or {}
         tt_raw = pub_raw.get("tiktok", {}) or {}
         yt_raw = pub_raw.get("youtube_shorts", {}) or {}
 
@@ -68,6 +70,7 @@ def _parse_profiles_data(raw: Any, only_enabled: bool = True) -> List[ProfileCon
                 timezone=str(pub_raw.get("timezone", "America/Sao_Paulo")),
                 drive_retention_days=int(pub_raw.get("drive_retention_days", 10)),
                 instagram=InstagramPublishConfig(**ig_raw),
+                facebook=FacebookPublishConfig(**fb_raw),
                 tiktok=TikTokPublishConfig(**tt_raw),
                 youtube_shorts=YouTubeShortsPublishConfig(**yt_raw),
             ),

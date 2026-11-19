@@ -117,6 +117,7 @@ class DiscordNotifier:
 
             plat_names = {
                 "instagram": "Instagram Reels",
+                "facebook": "Facebook Reels",
                 "youtube_shorts": "YouTube Shorts",
                 "youtube": "YouTube Shorts",
                 "tiktok": "TikTok",

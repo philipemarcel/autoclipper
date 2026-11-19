@@ -175,7 +175,13 @@ class TikTokPublisher:
                     "Conta TikTok não está Privada ou app aguarda auditoria; fazendo fallback para TikTok Inbox."
                 )
                 inbox_resp = self._post_init_request(inbox_endpoint, headers, {"source_info": source_info})
-                inbox_resp.raise_for_status()
+                if not inbox_resp.ok:
+                    inbox_code = self._extract_error_code(inbox_resp)
+                    if inbox_code == "spam_risk_too_many_pending_share":
+                        raise RuntimeError(
+                            "TikTok Inbox cheia (spam_risk_too_many_pending_share): publique ou apague os rascunhos pendentes na Caixa de Entrada do TikTok no celular."
+                        )
+                    raise RuntimeError(f"TikTok Inbox erro {inbox_resp.status_code}: {inbox_resp.text[:300]}")
                 return inbox_resp.json().get("data", {}), "inbox_fallback"
 
             raise RuntimeError(
@@ -183,5 +189,11 @@ class TikTokPublisher:
             )
 
         inbox_resp = self._post_init_request(inbox_endpoint, headers, {"source_info": source_info})
-        inbox_resp.raise_for_status()
+        if not inbox_resp.ok:
+            inbox_code = self._extract_error_code(inbox_resp)
+            if inbox_code == "spam_risk_too_many_pending_share":
+                raise RuntimeError(
+                    "TikTok Inbox cheia (spam_risk_too_many_pending_share): publique ou apague os rascunhos pendentes na Caixa de Entrada do TikTok no celular."
+                )
+            raise RuntimeError(f"TikTok Inbox erro {inbox_resp.status_code}: {inbox_resp.text[:300]}")
         return inbox_resp.json().get("data", {}), "inbox"

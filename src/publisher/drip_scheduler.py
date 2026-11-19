@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from src.models import ProfileConfig
+from src.publisher.facebook_reels import FacebookReelsPublisher
 from src.publisher.instagram_reels import InstagramReelsPublisher
 from src.publisher.tiktok_poster import TikTokPublisher
 from src.publisher.youtube_shorts import YouTubeShortsPublisher
@@ -206,7 +207,7 @@ class DripScheduler:
         self,
         profile: ProfileConfig,
         cut_dict: Dict[str, Any],
-        platforms: List[str],  # ["instagram", "tiktok"]
+        platforms: List[str],  # ["instagram", "facebook", "tiktok", "youtube_shorts"]
         work_dir: Path,
         force_immediate: bool = False,
         now_utc: Optional[datetime] = None,
@@ -214,7 +215,36 @@ class DripScheduler:
         now = now_utc or datetime.now(timezone.utc)
         state = self._load_queue_state()
 
-        # Evita duplicar o mesmo cut_id na fila
+        # Normaliza nomes e remove plataformas já publicadas para o mesmo cut_id (evita duplicação!)
+        already_done_plats: set[str] = set()
+        for it in state.get("items", []):
+            if it.get("cut_id") != cut_dict["cut_id"]:
+                continue
+            res = it.get("results") or {}
+            if res.get("instagram_reel_id"):
+                already_done_plats.add("instagram")
+            if res.get("facebook_reel_id"):
+                already_done_plats.add("facebook")
+            if res.get("tiktok_publish_id"):
+                already_done_plats.add("tiktok")
+            if res.get("youtube_short_url"):
+                already_done_plats.add("youtube")
+            if it.get("status") == "published" and not res:
+                already_done_plats.update(self._canonical_platform(p) for p in (it.get("platforms") or []))
+
+        clean_platforms: List[str] = []
+        seen_canon: set[str] = set()
+        for p in platforms:
+            canon = self._canonical_platform(p)
+            if canon in already_done_plats or canon in seen_canon:
+                continue
+            seen_canon.add(canon)
+            clean_platforms.append(p)
+
+        if not clean_platforms:
+            return {"mode": "already_published", "platforms": []}
+
+        # Evita duplicar o mesmo cut_id pendente na fila
         existing = [
             it for it in state.get("items", []) if it.get("cut_id") == cut_dict["cut_id"] and it.get("status") == "pending"
         ]
@@ -226,22 +256,62 @@ class DripScheduler:
             state["items"] = [
                 it for it in state.get("items", []) if not (it.get("cut_id") == cut_dict["cut_id"] and it.get("status") == "pending")
             ]
-            result = self._execute_publish(profile, cut_dict, platforms, work_dir)
-            state.setdefault("last_published_by_profile", {})[profile.id] = _to_iso_utc(now)
+            result, failed_plats, plat_errors = self._execute_publish_resilient(
+                profile, cut_dict, clean_platforms, work_dir
+            )
+            if result:
+                state.setdefault("last_published_by_profile", {})[profile.id] = _to_iso_utc(now)
+            if failed_plats:
+                backoff_min = 120 if any("spam_risk_too_many_pending_share" in e for e in plat_errors.values()) else 30
+                state.setdefault("items", []).append(
+                    {
+                        "cut_id": cut_dict["cut_id"],
+                        "profile_id": profile.id,
+                        "platforms": failed_plats,
+                        "scheduled_for": _to_iso_utc(now + timedelta(minutes=backoff_min)),
+                        "status": "pending",
+                        "results": result,
+                        "platform_errors": plat_errors,
+                        "last_error": "; ".join(f"{k}: {v}" for k, v in plat_errors.items()),
+                        "retry_count": 1,
+                        "discord_message_id": cut_dict.get("discord_message_id", ""),
+                        "created_at": _to_iso_utc(now),
+                    }
+                )
             self._save_queue_state(state)
-            return {"mode": "published_now", "results": result}
+            return {"mode": "published_now", "results": result, "failed_platforms": failed_plats}
 
         slot_utc, is_immediate = self.compute_next_slot(profile, state, now_utc=now)
         if is_immediate:
-            result = self._execute_publish(profile, cut_dict, platforms, work_dir)
-            state.setdefault("last_published_by_profile", {})[profile.id] = _to_iso_utc(now)
+            result, failed_plats, plat_errors = self._execute_publish_resilient(
+                profile, cut_dict, clean_platforms, work_dir
+            )
+            if result:
+                state.setdefault("last_published_by_profile", {})[profile.id] = _to_iso_utc(now)
+            if failed_plats:
+                backoff_min = 120 if any("spam_risk_too_many_pending_share" in e for e in plat_errors.values()) else 30
+                state.setdefault("items", []).append(
+                    {
+                        "cut_id": cut_dict["cut_id"],
+                        "profile_id": profile.id,
+                        "platforms": failed_plats,
+                        "scheduled_for": _to_iso_utc(now + timedelta(minutes=backoff_min)),
+                        "status": "pending",
+                        "results": result,
+                        "platform_errors": plat_errors,
+                        "last_error": "; ".join(f"{k}: {v}" for k, v in plat_errors.items()),
+                        "retry_count": 1,
+                        "discord_message_id": cut_dict.get("discord_message_id", ""),
+                        "created_at": _to_iso_utc(now),
+                    }
+                )
             self._save_queue_state(state)
-            return {"mode": "published_now", "results": result}
+            return {"mode": "published_now", "results": result, "failed_platforms": failed_plats}
 
         item = {
             "cut_id": cut_dict["cut_id"],
             "profile_id": profile.id,
-            "platforms": platforms,
+            "platforms": clean_platforms,
             "scheduled_for": _to_iso_utc(slot_utc),
             "status": "pending",
             "discord_message_id": cut_dict.get("discord_message_id", ""),
@@ -295,22 +365,73 @@ class DripScheduler:
             try:
                 if item.get("caption"):
                     cut_dict["caption"] = str(item["caption"])
-                res = self._execute_publish(prof, cut_dict, item["platforms"], work_dir)
-                item["status"] = "published"
-                item["published_at"] = _to_iso_utc(now)
+                existing_res = dict(item.get("results") or {})
+                res, failed_plats, plat_errors = self._execute_publish_resilient(
+                    prof,
+                    cut_dict,
+                    item.get("platforms") or [],
+                    work_dir,
+                    existing_results=existing_res,
+                )
                 item["results"] = res
-                cut_dict["status"] = "published"
-                state.setdefault("last_published_by_profile", {})[prof.id] = _to_iso_utc(now)
-                completed_reports.append({"item": item, "cut": cut_dict, "results": res})
+                if res:
+                    state.setdefault("last_published_by_profile", {})[prof.id] = _to_iso_utc(now)
+
+                if not failed_plats:
+                    item["status"] = "published"
+                    item["published_at"] = _to_iso_utc(now)
+                    item.pop("last_error", None)
+                    item.pop("platform_errors", None)
+                    cut_dict["status"] = "published"
+                    completed_reports.append({"item": item, "cut": cut_dict, "results": res})
+                else:
+                    # Preserva o sucesso parcial e NUNCA re-publica nas plataformas que já receberam o vídeo
+                    item["platforms"] = failed_plats
+                    item["platform_errors"] = plat_errors
+                    item["last_error"] = "; ".join(f"{k}: {v}" for k, v in plat_errors.items())[:500]
+                    retry_count = int(item.get("retry_count", 0)) + 1
+                    item["retry_count"] = retry_count
+                    if retry_count >= 3:
+                        item["status"] = "failed"
+                    else:
+                        is_rate_limit = any(
+                            code in err
+                            for err in plat_errors.values()
+                            for code in ("spam_risk_too_many_pending_share", "quotaExceeded", "uploadLimitExceeded")
+                        )
+                        delay_min = 120 if is_rate_limit else 30
+                        item["scheduled_for"] = _to_iso_utc(now + timedelta(minutes=delay_min))
+                    logger.warning(
+                        "Entrega parcial/falha para %s (retry=%s): ok=%s | falharam=%s",
+                        item["cut_id"],
+                        retry_count,
+                        list(res.keys()),
+                        failed_plats,
+                    )
                 changed = True
+                self._save_queue_state(state)
             except Exception as exc:
                 logger.error("Erro ao publicar item agendado %s: %s", item["cut_id"], exc)
                 item["last_error"] = str(exc)
+                retry_count = int(item.get("retry_count", 0)) + 1
+                item["retry_count"] = retry_count
+                if retry_count >= 3:
+                    item["status"] = "failed"
+                else:
+                    item["scheduled_for"] = _to_iso_utc(now + timedelta(minutes=30))
                 changed = True
+                self._save_queue_state(state)
 
         if changed:
             self._save_queue_state(state)
         return completed_reports
+
+    @staticmethod
+    def _canonical_platform(name: str) -> str:
+        low = str(name or "").strip().lower()
+        if low in ("youtube", "youtube_shorts"):
+            return "youtube"
+        return low
 
     def _execute_publish(
         self,
@@ -319,43 +440,113 @@ class DripScheduler:
         platforms: List[str],
         work_dir: Path,
     ) -> Dict[str, str]:
+        results, failed, errors = self._execute_publish_resilient(profile, cut_dict, platforms, work_dir)
+        if failed:
+            first_p = failed[0]
+            raise RuntimeError(f"Falha ao publicar em {first_p}: {errors.get(first_p, 'erro desconhecido')}")
+        return results
+
+    def _execute_publish_resilient(
+        self,
+        profile: ProfileConfig,
+        cut_dict: Dict[str, Any],
+        platforms: List[str],
+        work_dir: Path,
+        existing_results: Optional[Dict[str, str]] = None,
+    ) -> tuple[Dict[str, str], List[str], Dict[str, str]]:
         work_dir.mkdir(parents=True, exist_ok=True)
         local_master = work_dir / f"{cut_dict['cut_id']}_publish_master.mp4"
         self.store.download_file_by_ref(cut_dict["master_file_id"], local_master)
 
         caption = str(cut_dict.get("caption", ""))
-        results: Dict[str, str] = {}
+        results: Dict[str, str] = dict(existing_results or {})
+        failed_platforms: List[str] = []
+        platform_errors: Dict[str, str] = {}
+        requested_canon = [self._canonical_platform(p) for p in platforms]
 
-        if "instagram" in platforms and profile.publishing.instagram.enabled:
-            ig = InstagramReelsPublisher(profile)
-            if ig.is_ready:
-                video_url = str(cut_dict.get("download_url") or "")
-                if ig.is_instagram_login_token and not video_url:
-                    video_url = self.store.ensure_public_download_url(cut_dict["master_file_id"])
-                    if video_url:
-                        cut_dict["download_url"] = video_url
-                results["instagram_reel_id"] = ig.publish_reel(local_master, caption, video_url=video_url)
+        # 1. Instagram Reels
+        if "instagram" in requested_canon and profile.publishing.instagram.enabled:
+            if results.get("instagram_reel_id"):
+                logger.info("Instagram já publicado antes para %s; pulando para evitar duplicação.", cut_dict["cut_id"])
             else:
-                results["instagram"] = "skipped_unconfigured"
+                try:
+                    ig = InstagramReelsPublisher(profile)
+                    if ig.is_ready:
+                        video_url = str(cut_dict.get("download_url") or "")
+                        if not video_url:
+                            try:
+                                video_url = self.store.ensure_public_download_url(cut_dict["master_file_id"])
+                                if video_url:
+                                    cut_dict["download_url"] = video_url
+                            except Exception:
+                                pass
+                        results["instagram_reel_id"] = ig.publish_reel(local_master, caption, video_url=video_url)
+                    else:
+                        results["instagram"] = "skipped_unconfigured"
+                except Exception as exc:
+                    logger.error("Erro Instagram para %s: %s", cut_dict["cut_id"], exc)
+                    failed_platforms.append("instagram")
+                    platform_errors["instagram"] = str(exc)
 
-        if "tiktok" in platforms and profile.publishing.tiktok.enabled:
-            tt = TikTokPublisher(profile)
-            if tt.is_ready:
-                results["tiktok_publish_id"] = tt.publish_video(local_master, caption)
-                if tt.last_publish_mode:
-                    results["tiktok_mode"] = tt.last_publish_mode
+        # 2. Facebook Page Reels
+        fb_cfg = getattr(profile.publishing, "facebook", None)
+        fb_enabled = bool(fb_cfg.enabled) if fb_cfg is not None else True
+        if "facebook" in requested_canon and fb_enabled:
+            if results.get("facebook_reel_id"):
+                logger.info("Facebook já publicado antes para %s; pulando para evitar duplicação.", cut_dict["cut_id"])
             else:
-                results["tiktok"] = "skipped_unconfigured"
+                try:
+                    fb = FacebookReelsPublisher(profile)
+                    if fb.is_ready and fb.has_publish_permission():
+                        results["facebook_reel_id"] = fb.publish_reel(local_master, caption)
+                    elif fb.is_ready:
+                        logger.warning(
+                            "Facebook Page detectado, mas token ainda sem permissão `pages_manage_posts`; defina FB_ACCESS_TOKEN."
+                        )
+                        results["facebook"] = "skipped_missing_pages_manage_posts"
+                    else:
+                        results["facebook"] = "skipped_unconfigured"
+                except Exception as exc:
+                    logger.error("Erro Facebook para %s: %s", cut_dict["cut_id"], exc)
+                    failed_platforms.append("facebook")
+                    platform_errors["facebook"] = str(exc)
 
-        if ("youtube" in platforms or "youtube_shorts" in platforms) and profile.publishing.youtube_shorts.enabled:
-            yt = YouTubeShortsPublisher(profile)
-            if yt.is_ready:
-                results["youtube_short_url"] = yt.publish_short(
-                    local_master,
-                    caption,
-                    title_hint=str(cut_dict.get("teaser_headline") or ""),
-                )
+        # 3. TikTok
+        if "tiktok" in requested_canon and profile.publishing.tiktok.enabled:
+            if results.get("tiktok_publish_id"):
+                logger.info("TikTok já publicado antes para %s; pulando para evitar duplicação.", cut_dict["cut_id"])
             else:
-                results["youtube_shorts"] = "skipped_unconfigured"
+                try:
+                    tt = TikTokPublisher(profile)
+                    if tt.is_ready:
+                        results["tiktok_publish_id"] = tt.publish_video(local_master, caption)
+                        if tt.last_publish_mode:
+                            results["tiktok_mode"] = tt.last_publish_mode
+                    else:
+                        results["tiktok"] = "skipped_unconfigured"
+                except Exception as exc:
+                    logger.error("Erro TikTok para %s: %s", cut_dict["cut_id"], exc)
+                    failed_platforms.append("tiktok")
+                    platform_errors["tiktok"] = str(exc)
 
-        return results
+        # 4. YouTube Shorts
+        if "youtube" in requested_canon and profile.publishing.youtube_shorts.enabled:
+            if results.get("youtube_short_url"):
+                logger.info("YouTube Shorts já publicado antes para %s; pulando para evitar duplicação.", cut_dict["cut_id"])
+            else:
+                try:
+                    yt = YouTubeShortsPublisher(profile)
+                    if yt.is_ready:
+                        results["youtube_short_url"] = yt.publish_short(
+                            local_master,
+                            caption,
+                            title_hint=str(cut_dict.get("teaser_headline") or ""),
+                        )
+                    else:
+                        results["youtube_shorts"] = "skipped_unconfigured"
+                except Exception as exc:
+                    logger.error("Erro YouTube Shorts para %s: %s", cut_dict["cut_id"], exc)
+                    failed_platforms.append("youtube")
+                    platform_errors["youtube"] = str(exc)
+
+        return results, failed_platforms, platform_errors

@@ -71,12 +71,20 @@ class YouTubeShortsPublishConfig:
 
 
 @dataclass
+class FacebookPublishConfig:
+    enabled: bool = True
+    page_id_env: str = "FB_PAGE_ID"
+    access_token_env: str = "FB_ACCESS_TOKEN"
+
+
+@dataclass
 class PublishingConfig:
     drip_interval_minutes: int = 75
     quiet_hours_brt: Optional[List[int]] = field(default_factory=lambda: [3, 9])
     timezone: str = "America/Sao_Paulo"
     drive_retention_days: int = 10
     instagram: InstagramPublishConfig = field(default_factory=InstagramPublishConfig)
+    facebook: FacebookPublishConfig = field(default_factory=FacebookPublishConfig)
     tiktok: TikTokPublishConfig = field(default_factory=TikTokPublishConfig)
     youtube_shorts: YouTubeShortsPublishConfig = field(default_factory=YouTubeShortsPublishConfig)
 

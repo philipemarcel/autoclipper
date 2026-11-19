@@ -1215,3 +1215,158 @@ def test_youtube_shorts_publisher_metadata_and_discord_buttons(tmp_path: Path, m
     custom_ids = [b["custom_id"] for b in rows[0]["components"]]
     assert "approve_both:cut_yt_1" in custom_ids
     assert "approve_youtube:cut_yt_1" in custom_ids
+
+
+def test_resilient_per_platform_no_duplicate_on_partial_failure(tmp_path: Path, monkeypatch):
+    store = DriveStore(fallback_local_dir=tmp_path / "drive_resilient")
+    prof = _make_profile()
+    prof.publishing.instagram.enabled = True
+    prof.publishing.facebook.enabled = False
+    prof.publishing.tiktok.enabled = True
+    prof.publishing.youtube_shorts.enabled = True
+
+    master = tmp_path / "master.mp4"
+    master.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    mid, _ = store.upload_file(master, ["cortes", "criador_01", "cut_part_1"], "master_1080p60.mp4")
+
+    processed_state = {
+        "cuts": [
+            {
+                "cut_id": "cut_part_1",
+                "profile_id": prof.id,
+                "caption": "legenda teste #cortes",
+                "master_file_id": mid,
+                "download_url": "https://example.com/v.mp4",
+                "teaser_headline": "TESTE",
+            }
+        ]
+    }
+    now = datetime(2026, 11, 19, 15, 0, 0, tzinfo=timezone.utc)
+    store.save_state_json(
+        "drip_queue.json",
+        {
+            "last_published_by_profile": {},
+            "items": [
+                {
+                    "cut_id": "cut_part_1",
+                    "profile_id": prof.id,
+                    "platforms": ["instagram", "youtube_shorts", "tiktok"],
+                    "scheduled_for": "2026-11-19T14:55:00Z",
+                    "status": "pending",
+                    "created_at": "2026-11-19T14:00:00Z",
+                }
+            ],
+        },
+    )
+
+    ig_calls = 0
+    yt_calls = 0
+    tt_calls = 0
+
+    class FakeIG:
+        is_ready = True
+        is_instagram_login_token = False
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def publish_reel(self, *a, **kw):
+            nonlocal ig_calls
+            ig_calls += 1
+            return "ig_media_111"
+
+    class FakeYT:
+        is_ready = True
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def publish_short(self, *a, **kw):
+            nonlocal yt_calls
+            yt_calls += 1
+            return "https://youtube.com/shorts/yt111"
+
+    class FakeTT:
+        is_ready = True
+        last_publish_mode = ""
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def publish_video(self, *a, **kw):
+            nonlocal tt_calls
+            tt_calls += 1
+            if tt_calls == 1:
+                raise RuntimeError("TikTok Inbox cheia (spam_risk_too_many_pending_share)")
+            self.last_publish_mode = "inbox_fallback"
+            return "tt_pub_111"
+
+    monkeypatch.setattr("src.publisher.drip_scheduler.InstagramReelsPublisher", FakeIG)
+    monkeypatch.setattr("src.publisher.drip_scheduler.YouTubeShortsPublisher", FakeYT)
+    monkeypatch.setattr("src.publisher.drip_scheduler.TikTokPublisher", FakeTT)
+
+    scheduler = DripScheduler(store)
+    scheduler.process_due_queue({prof.id: prof}, processed_state, tmp_path / "work", now_utc=now)
+
+    # IG and YT both succeeded, TikTok failed -> only tiktok left in platforms, IG/YT IDs preserved
+    st = store.load_state_json("drip_queue.json", {})
+    it = st["items"][0]
+    assert ig_calls == 1
+    assert yt_calls == 1
+    assert tt_calls == 1
+    assert it["status"] == "pending"
+    assert it["platforms"] == ["tiktok"]
+    assert it["results"]["instagram_reel_id"] == "ig_media_111"
+    assert it["results"]["youtube_short_url"] == "https://youtube.com/shorts/yt111"
+
+    # Retry run 2 hours later: IG and YT must NEVER be called again!
+    later = now + timedelta(hours=2, minutes=5)
+    reports = scheduler.process_due_queue({prof.id: prof}, processed_state, tmp_path / "work", now_utc=later)
+    assert len(reports) == 1
+    assert ig_calls == 1
+    assert yt_calls == 1
+    assert tt_calls == 2
+    st2 = store.load_state_json("drip_queue.json", {})
+    assert st2["items"][0]["status"] == "published"
+    assert st2["items"][0]["results"]["tiktok_publish_id"] == "tt_pub_111"
+
+
+def test_facebook_reels_publisher_flow(tmp_path: Path, monkeypatch):
+    from src.publisher.facebook_reels import FacebookReelsPublisher
+
+    prof = _make_profile()
+    prof.publishing.facebook.enabled = True
+
+    class FakeResp:
+        ok = True
+        status_code = 200
+        text = "{}"
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    posts = []
+
+    def fake_post(url, data=None, headers=None, files=None, timeout=None):
+        posts.append((url, data))
+        if url.endswith("/video_reels") and (data or {}).get("upload_phase") == "start":
+            return FakeResp({"video_id": "fb_vid_77", "upload_url": "https://rupload.facebook.com/video-upload/v21.0/fb_vid_77"})
+        if "rupload.facebook.com/video-upload" in url:
+            assert headers.get("Content-Length") == str(len(b"\x00\x00\x00\x20ftypmp42"))
+            return FakeResp({"success": True})
+        return FakeResp({"success": True})
+
+    monkeypatch.setattr("src.publisher.facebook_reels.requests.post", fake_post)
+    fb = FacebookReelsPublisher(prof, page_id="1516904708162317", access_token="EAA_fb_page_tok")
+    assert fb.is_ready is True
+    mp4 = tmp_path / "fb.mp4"
+    mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    vid_id = fb.publish_reel(mp4, caption="clip brabo #cortes")
+    assert vid_id == "fb_vid_77"
+    assert len(posts) == 3

@@ -167,6 +167,7 @@ def build_decision_from_level(
 
     safety_map = {
         "instagram": ig_safe,
+        "facebook": ig_safe,
         "youtube_shorts": yt_safe,
         "youtube": yt_safe,
         "tiktok": tt_safe,

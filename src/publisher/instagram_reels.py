@@ -71,7 +71,31 @@ class InstagramReelsPublisher:
 
         if self.is_instagram_login_token:
             return self._publish_via_instagram_login(caption=caption, video_url=video_url, max_wait_sec=max_wait_sec)
-        return self._publish_via_facebook_resumable(video_path=video_path, caption=caption, max_wait_sec=max_wait_sec)
+        try:
+            return self._publish_via_facebook_resumable(video_path=video_path, caption=caption, max_wait_sec=max_wait_sec)
+        except Exception as exc:
+            clean_url = str(video_url or "").strip()
+            if clean_url.startswith("http"):
+                logger.warning("Instagram rupload falhou (%s); tentando fallback via video_url pública.", exc)
+                return self._publish_via_facebook_url(caption=caption, video_url=clean_url, max_wait_sec=max_wait_sec)
+            raise
+
+    def _publish_via_facebook_url(self, caption: str, video_url: str, max_wait_sec: int) -> str:
+        init_resp = requests.post(
+            f"{GRAPH_FB_BASE}/{self.account_id}/media",
+            data={
+                "media_type": "REELS",
+                "video_url": video_url,
+                "caption": caption,
+                "share_to_feed": "true",
+                "access_token": self.access_token,
+            },
+            timeout=30,
+        )
+        if not init_resp.ok:
+            raise RuntimeError(f"Instagram FB video_url init erro {init_resp.status_code}: {init_resp.text[:350]}")
+        container_id = str(init_resp.json()["id"])
+        return self._wait_and_publish(GRAPH_FB_BASE, container_id, max_wait_sec=max_wait_sec)
 
     def _publish_via_instagram_login(self, caption: str, video_url: str, max_wait_sec: int) -> str:
         clean_url = str(video_url or "").strip()
@@ -96,7 +120,8 @@ class InstagramReelsPublisher:
         return self._wait_and_publish(GRAPH_IG_BASE, container_id, max_wait_sec=max_wait_sec)
 
     def _publish_via_facebook_resumable(self, video_path: Path, caption: str, max_wait_sec: int) -> str:
-        file_size = video_path.stat().st_size
+        raw_bytes = video_path.read_bytes()
+        file_size = len(raw_bytes)
 
         # Passo 1: Inicializa Container Resumable REELS
         init_resp = requests.post(
@@ -110,21 +135,23 @@ class InstagramReelsPublisher:
             },
             timeout=30,
         )
-        init_resp.raise_for_status()
+        if not init_resp.ok:
+            raise RuntimeError(f"Instagram container init erro {init_resp.status_code}: {init_resp.text[:350]}")
         init_data = init_resp.json()
         container_id = str(init_data["id"])
         upload_uri = str(init_data.get("uri") or f"{RUPLOAD_BASE}/{container_id}")
 
-        # Passo 2: Envia o vídeo binário direto para `rupload.facebook.com`
+        # Passo 2: Envia o vídeo binário com Content-Length explícito (evita 400 chunked no rupload)
         headers = {
             "Authorization": f"OAuth {self.access_token}",
             "offset": "0",
             "file_size": str(file_size),
+            "Content-Length": str(file_size),
             "Content-Type": "application/octet-stream",
         }
-        with open(video_path, "rb") as fh:
-            up_resp = requests.post(upload_uri, headers=headers, data=fh, timeout=300)
-        up_resp.raise_for_status()
+        up_resp = requests.post(upload_uri, headers=headers, data=raw_bytes, timeout=300)
+        if not up_resp.ok:
+            raise RuntimeError(f"Instagram rupload erro {up_resp.status_code}: {up_resp.text[:350]}")
 
         return self._wait_and_publish(GRAPH_FB_BASE, container_id, max_wait_sec=max_wait_sec)
 

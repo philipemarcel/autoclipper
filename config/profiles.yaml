@@ -83,6 +83,11 @@ profiles:
         account_id_env: "IG_ACCOUNT_ID"
         access_token_env: "IG_ACCESS_TOKEN"
 
+      facebook:
+        enabled: true
+        page_id_env: "FB_PAGE_ID"
+        access_token_env: "FB_ACCESS_TOKEN"
+
       tiktok:
         enabled: true
         # "direct" = envia via Direct Post (/video/init/) com legenda/hashtags já anexadas no TikTok!

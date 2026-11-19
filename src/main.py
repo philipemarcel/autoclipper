@@ -173,10 +173,12 @@ def process_single_cluster(
         if cluster.best_clip.created_at:
             meta_dict["clip_created_at"] = cluster.best_clip.created_at
 
-        # 7.5. Moderação automática visual + áudio por plataforma (Instagram vs YouTube Shorts vs TikTok)
+        # 7.5. Moderação automática visual + áudio por plataforma (Instagram vs YouTube Shorts vs TikTok vs Facebook)
         enabled_platforms: List[str] = []
         if profile.publishing.instagram.enabled:
             enabled_platforms.append("instagram")
+        if getattr(profile.publishing, "facebook", None) is None or profile.publishing.facebook.enabled:
+            enabled_platforms.append("facebook")
         if profile.publishing.youtube_shorts.enabled:
             enabled_platforms.append("youtube_shorts")
         if profile.publishing.tiktok.enabled:
@@ -647,9 +649,9 @@ def cmd_discord_action(
 
         # Ações de aprovação e publicação
         platform_map = {
-            "approve_both": (["instagram", "tiktok", "youtube"], False),
-            "now_both": (["instagram", "tiktok", "youtube"], True),
-            "approve_reels": (["instagram"], False),
+            "approve_both": (["instagram", "facebook", "tiktok", "youtube"], False),
+            "now_both": (["instagram", "facebook", "tiktok", "youtube"], True),
+            "approve_reels": (["instagram", "facebook"], False),
             "approve_tiktok": (["tiktok"], False),
             "now_tiktok": (["tiktok"], True),
             "approve_youtube": (["youtube"], False),
