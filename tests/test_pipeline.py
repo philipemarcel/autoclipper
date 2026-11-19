@@ -1469,3 +1469,55 @@ def test_process_due_queue_enforces_spacing_on_backlog(tmp_path: Path, monkeypat
     assert st["items"][0]["status"] == "published"
     assert st["items"][1]["status"] == "pending"
     assert st["items"][1]["scheduled_for"] == "2026-11-19T16:00:00Z"
+
+
+def test_cleanup_instagram_low_views_script(monkeypatch):
+    from scripts.cleanup_instagram_low_views import delete_ig_media, find_low_view_media
+
+    class FakeResp:
+        ok = True
+        status_code = 200
+        text = "{}"
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, params=None, timeout=None):
+        if url.endswith("/media"):
+            return FakeResp(
+                {
+                    "data": [
+                        {"id": "m_low", "caption": "duplicado #cortes", "timestamp": "2026-11-19T12:00:00Z", "permalink": "https://instagram.com/reel/low/"},
+                        {"id": "m_ok", "caption": "viral #cortes", "timestamp": "2026-11-19T13:00:00Z", "permalink": "https://instagram.com/reel/ok/"},
+                    ]
+                }
+            )
+        if "/m_low/insights" in url:
+            return FakeResp({"data": [{"values": [{"value": 4}]}]})
+        if "/m_ok/insights" in url:
+            return FakeResp({"data": [{"values": [{"value": 850}]}]})
+        return FakeResp({})
+
+    deleted_ids = []
+
+    def fake_delete(url, params=None, timeout=None):
+        deleted_ids.append(url.rsplit("/", 1)[-1])
+        return FakeResp({"success": True})
+
+    monkeypatch.setattr("scripts.cleanup_instagram_low_views.requests.get", fake_get)
+    monkeypatch.setattr("scripts.cleanup_instagram_low_views.requests.delete", fake_delete)
+
+    low = find_low_view_media("ig_1", "tok_1", min_views=10)
+    assert len(low) == 1
+    assert low[0]["id"] == "m_low"
+    assert low[0]["views"] == 4
+
+    ok, _ = delete_ig_media("m_low", "tok_1")
+    assert ok is True
+    assert deleted_ids == ["m_low"]
