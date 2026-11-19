@@ -1896,3 +1896,158 @@ def test_cron_grace_window_and_tiktok_catchup_does_not_delay_feed_posts(tmp_path
     assert len(reports) == 2
     assert len(tt_calls) == 1
     assert len(ig_calls) == 1
+
+
+def test_content_moderator_batches_max_3_images_and_blocks_nudity(tmp_path: Path, monkeypatch):
+    from src.ai import content_moderator as cm
+
+    dummy = tmp_path / "vid.mp4"
+    dummy.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    monkeypatch.setattr(cm, "extract_sample_frames_b64", lambda vp, max_frames=6: [f"img{i}" for i in range(6)])
+
+    batch_sizes = []
+
+    class FakeResp:
+        def __init__(self, payload: dict):
+            self.status_code = 200
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._payload
+
+    call_idx = 0
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        nonlocal call_idx
+        call_idx += 1
+        msgs = json["messages"][0]["content"]
+        imgs = [m for m in msgs if m.get("type") == "image_url"]
+        batch_sizes.append(len(imgs))
+        if call_idx == 1:
+            return FakeResp({"choices": [{"message": {"content": '{"exposure_level": "clean", "instagram_safe": true, "youtube_shorts_safe": true, "tiktok_safe": true, "reason": "ok"}'}}]})
+        return FakeResp({"choices": [{"message": {"content": '{"exposure_level": "explicit_indecent", "instagram_safe": false, "youtube_shorts_safe": false, "tiktok_safe": false, "reason": "Nudez detectada no frame 4"}'}}]})
+
+    monkeypatch.setattr("src.ai.content_moderator.requests.post", fake_post)
+    dec = cm.moderate_video_for_platforms(
+        dummy,
+        requested_platforms=["instagram", "facebook", "youtube_shorts", "tiktok"],
+        title="gameplay normal",
+        transcript_text="olha isso mano",
+        groq_api_key="gsk_test",
+    )
+    assert batch_sizes == [3, 3]  # Nunca ultrapassa limite de 3 imagens da Groq Vision!
+    assert dec.vision_checked is True
+    assert dec.exposure_level == "explicit_indecent"
+    assert dec.allowed_platforms == []
+    assert set(dec.blocked_platforms) == {"instagram", "facebook", "youtube_shorts", "tiktok"}
+
+
+def test_drip_scheduler_publish_time_dedup_and_nudity_gate(tmp_path: Path, monkeypatch):
+    from src.ai.content_moderator import PlatformModerationDecision
+
+    store = DriveStore(fallback_local_dir=tmp_path / "drive_pub_gate")
+    prof = _make_profile()
+    prof.publishing.instagram.enabled = True
+    prof.publishing.facebook.enabled = False
+    prof.publishing.tiktok.enabled = False
+    prof.publishing.youtube_shorts.enabled = False
+
+    mp4 = tmp_path / "pub_gate.mp4"
+    mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+    m_dup, _ = store.upload_file(mp4, ["cortes", "criador_01", "dup_old"], "master_1080p60.mp4")
+    m_nude, _ = store.upload_file(mp4, ["cortes", "criador_01", "nude_old"], "master_1080p60.mp4")
+
+    processed_state = {
+        "cuts": [
+            {
+                "cut_id": "cut_pub_already",
+                "profile_id": prof.id,
+                "twitch_login": prof.twitch_login,
+                "caption": "ele dropou a faca mais rara do jogo no meio da live",
+                "status": "published",
+            },
+            {
+                "cut_id": "cut_pending_dup",
+                "profile_id": prof.id,
+                "twitch_login": prof.twitch_login,
+                "caption": "dropou uma faca mais rara do jogo no meio da live #cortes",
+                "master_file_id": m_dup,
+            },
+            {
+                "cut_id": "cut_pending_nude",
+                "profile_id": prof.id,
+                "twitch_login": prof.twitch_login,
+                "caption": "clipe normal sem palavras ruins no texto",
+                "master_file_id": m_nude,
+            },
+        ]
+    }
+    now = datetime(2026, 11, 19, 19, 0, 0, tzinfo=timezone.utc)
+    store.save_state_json(
+        "drip_queue.json",
+        {
+            "last_published_by_profile": {},
+            "items": [
+                {
+                    "cut_id": "cut_pub_already",
+                    "profile_id": prof.id,
+                    "platforms": ["instagram"],
+                    "scheduled_for": "2026-11-19T12:00:00Z",
+                    "published_at": "2026-11-19T12:00:00Z",
+                    "status": "published",
+                    "caption": "ele dropou a faca mais rara do jogo no meio da live",
+                },
+                {
+                    "cut_id": "cut_pending_dup",
+                    "profile_id": prof.id,
+                    "platforms": ["instagram"],
+                    "scheduled_for": "2026-11-19T18:00:00Z",
+                    "status": "pending",
+                },
+                {
+                    "cut_id": "cut_pending_nude",
+                    "profile_id": prof.id,
+                    "platforms": ["instagram"],
+                    "scheduled_for": "2026-11-19T18:30:00Z",
+                    "status": "pending",
+                },
+            ],
+        },
+    )
+
+    ig_called = 0
+
+    class FakeIG:
+        is_ready = True
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def publish_reel(self, *a, **kw):
+            nonlocal ig_called
+            ig_called += 1
+            return "ig_should_not_post"
+
+    monkeypatch.setattr("src.publisher.drip_scheduler.InstagramReelsPublisher", FakeIG)
+    monkeypatch.setattr(
+        "src.publisher.drip_scheduler.moderate_video_for_platforms",
+        lambda **kw: PlatformModerationDecision(
+            exposure_level="explicit_indecent",
+            instagram_safe=False,
+            youtube_shorts_safe=False,
+            tiktok_safe=False,
+            allowed_platforms=[],
+            blocked_platforms=["instagram"],
+            reason="Nudez visual detectada",
+            vision_checked=True,
+        ),
+    )
+
+    scheduler = DripScheduler(store)
+    scheduler.process_due_queue({prof.id: prof}, processed_state, tmp_path / "work_gate", now_utc=now)
+    assert ig_called == 0
+    st = store.load_state_json("drip_queue.json", {})
+    by_id = {it["cut_id"]: it for it in st["items"]}
+    assert by_id["cut_pending_dup"]["status"] == "skipped_duplicate"
+    assert by_id["cut_pending_nude"]["status"] == "blocked_nudity"

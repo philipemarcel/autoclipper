@@ -19,11 +19,13 @@ logger = logging.getLogger(__name__)
 
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 VISION_MODEL = "qwen/qwen3.8-27b"
+GROQ_VISION_MAX_IMAGES = 3  # Limite estrito do modelo qwen3.8-27b na Groq (HTTP 400 se > 3)
 
 EXPLICIT_KEYWORDS = (
     "pelado",
     "pelada",
     "nudez",
+    "nudismo",
     "nudes",
     "porno",
     "pornô",
@@ -34,22 +36,24 @@ EXPLICIT_KEYWORDS = (
     "hentai",
     "nsfw",
     "xvideos",
-    "onlyfans vazado",
+    "onlyfans",
+    "strip club",
+    "boate de strip",
+    "lingerie",
+    "calcinha",
+    "sutia",
+    "sutiã",
+    "seminua",
+    "seminu",
+    "naked",
+    "nudity",
 )
 
 MILD_BODY_KEYWORDS = (
     "biquini",
     "biquíni",
     "sunga",
-    "lingerie",
-    "calcinha",
-    "sutiã",
-    "sutia",
-    "strip club",
-    "boate de strip",
     "sem camisa",
-    "seminua",
-    "seminu",
     "decote",
 )
 
@@ -65,6 +69,7 @@ class PlatformModerationDecision:
     allowed_platforms: List[str]
     blocked_platforms: List[str]
     reason: str
+    vision_checked: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -89,14 +94,14 @@ def _probe_duration(video_path: Path) -> float:
     return 30.0
 
 
-def extract_sample_frames_b64(video_path: Path, max_frames: int = 4) -> List[str]:
+def extract_sample_frames_b64(video_path: Path, max_frames: int = 6) -> List[str]:
     """Extract evenly spaced low-res JPEG frames as base64 strings for vision moderation."""
     if not video_path.exists():
         return []
 
     ffmpeg = _get_ffmpeg_exe()
     duration = max(1.0, _probe_duration(video_path))
-    ratios = [0.15, 0.40, 0.65, 0.85][: max(1, max_frames)]
+    ratios = [0.10, 0.25, 0.42, 0.58, 0.74, 0.90][: max(1, max_frames)]
     frames_b64: List[str] = []
 
     with tempfile.TemporaryDirectory(prefix="mod_frames_") as tmpdir:
@@ -146,19 +151,15 @@ def build_decision_from_level(
     ig_override: Optional[bool] = None,
     yt_override: Optional[bool] = None,
     tt_override: Optional[bool] = None,
+    vision_checked: bool = False,
 ) -> PlatformModerationDecision:
     """Apply platform-specific decency rules to an exposure level."""
     norm = (exposure_level or "clean").strip().lower()
-    if norm == "explicit_indecent":
+    if norm in {"explicit_indecent", "mild_body_exposure"}:
+        # Política rigorosa: qualquer nudez, seminudez, lingerie, biquíni sensual ou strip club é bloqueado em todas as redes.
         ig_safe = False
         yt_safe = False
         tt_safe = False
-    elif norm == "mild_body_exposure":
-        # Instagram allows showing more body parts (swimwear, shirtless, mild cleavage/skin) without explicit nudity.
-        # YouTube Shorts and TikTok are stricter on body exposure / suggestive visuals.
-        ig_safe = True if ig_override is None else bool(ig_override)
-        yt_safe = False if yt_override is None else bool(yt_override)
-        tt_safe = False if tt_override is None else bool(tt_override)
     else:
         norm = "clean"
         ig_safe = True if ig_override is None else bool(ig_override)
@@ -183,6 +184,7 @@ def build_decision_from_level(
         allowed_platforms=allowed,
         blocked_platforms=blocked,
         reason=reason.strip() or "Verificação concluída.",
+        vision_checked=vision_checked,
     )
 
 
@@ -194,12 +196,11 @@ def _call_groq_vision_moderation(
     timeout_sec: int = 25,
 ) -> Optional[dict[str, Any]]:
     prompt = (
-        "Você é um moderador de conteúdo visual e de áudio para publicação automática em redes sociais.\n"
-        "Analise os frames do vídeo e o contexto abaixo para classificar o nível de exposição corporal/nudez de acordo com cada plataforma:\n"
-        "1. 'clean': Gameplay normal, reação, humor, conversa sem exposição corporal sensualizada e sem nudez. (Seguro em TODAS: Instagram, YouTube Shorts e TikTok).\n"
-        "2. 'mild_body_exposure': Mostra mais partes do corpo (ex: biquíni, sunga, praia, piscina, sem camisa com foco corporal, decote acentuado, lingerie, strip club de GTA/jogos, dança sensual) MAS SEM nudez explícita. "
-        "No Instagram ('instagram_safe': true) isso é permitido sem problemas; já no YouTube Shorts ('youtube_shorts_safe': false) e TikTok ('tiktok_safe': false) deve ser bloqueado por diretrizes mais rígidas.\n"
-        "3. 'explicit_indecent': Nudez explícita (mamilos femininos/topless, genitália, sexo explícito, pornografia) ou gore extremo. Bloqueado em TODAS as plataformas.\n\n"
+        "Você é um moderador rigoroso de conteúdo visual e de áudio para publicação em redes sociais.\n"
+        "Analise TODAS as imagens (inclusive personagens de jogos como GTA/RP, IRL, transmissões ou memes) e classifique o nível de nudez/exposição corporal:\n"
+        "1. 'clean': Gameplay normal, reação, rosto em webcam, conversa ou humor SEM nudez, SEM seminudez, SEM foco sensual/erótico.\n"
+        "2. 'mild_body_exposure': Qualquer seminudez, roupa íntima (calcinha/sutiã/cueca), biquíni/sunga sensualizado, decote explícito, pessoa sem camisa focando o corpo ou dança sensual. Deve bloquear em TODAS as plataformas.\n"
+        "3. 'explicit_indecent': Nudez explícita (seios/mamilos expostos, nádegas/genitália à mostra, topless, strip club de jogos/IRL, sexo simulado ou explícito, pornografia, hentai) ou gore extremo. Deve bloquear em TODAS as plataformas.\n\n"
         f"Título: {title[:150]}\n"
         f"Transcrição: {transcript_text[:600]}\n\n"
         "Responda APENAS um JSON válido neste formato exato:\n"
@@ -207,7 +208,7 @@ def _call_groq_vision_moderation(
     )
 
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    for b64 in frames_b64[:4]:
+    for b64 in frames_b64[:GROQ_VISION_MAX_IMAGES]:
         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
 
     resp = requests.post(
@@ -238,41 +239,62 @@ def moderate_video_for_platforms(
     transcript_text: str = "",
     groq_api_key: Optional[str] = None,
 ) -> PlatformModerationDecision:
-    """Inspect video frames and transcript to decide which platforms can automatically receive the video."""
+    """Inspect video frames (in <=3-image batches) and transcript to block nudity/seminudity."""
     text_level, text_reason = evaluate_text_heuristics(title, transcript_text)
     if text_level == "explicit_indecent":
-        return build_decision_from_level("explicit_indecent", requested_platforms, text_reason)
+        return build_decision_from_level("explicit_indecent", requested_platforms, text_reason, vision_checked=False)
 
     api_key = (groq_api_key if groq_api_key is not None else os.getenv("GROQ_API_KEY", "")).strip()
-    frames_b64 = extract_sample_frames_b64(video_path, max_frames=4)
+    frames_b64 = extract_sample_frames_b64(video_path, max_frames=6)
+
+    severity_rank = {"clean": 0, "mild_body_exposure": 1, "explicit_indecent": 2}
+    worst_level = text_level
+    worst_reason = text_reason
+    worst_vision: Optional[dict[str, Any]] = None
+    vision_ok = False
 
     if api_key and frames_b64:
-        try:
-            vision_res = _call_groq_vision_moderation(
-                frames_b64=frames_b64,
-                title=title,
-                transcript_text=transcript_text,
-                api_key=api_key,
-            )
-            if vision_res:
-                v_level = str(vision_res.get("exposure_level") or "clean").strip().lower()
-                # If text heuristic already spotted mild_body_exposure, keep at least mild_body_exposure
-                if text_level == "mild_body_exposure" and v_level == "clean":
-                    v_level = "mild_body_exposure"
-                reason = str(vision_res.get("reason") or text_reason)
-                if v_level == "explicit_indecent":
-                    return build_decision_from_level("explicit_indecent", requested_platforms, reason)
-                if v_level == "mild_body_exposure":
-                    return build_decision_from_level("mild_body_exposure", requested_platforms, reason)
-                return build_decision_from_level(
-                    v_level,
-                    requested_platforms,
-                    reason,
-                    ig_override=vision_res.get("instagram_safe"),
-                    yt_override=vision_res.get("youtube_shorts_safe"),
-                    tt_override=vision_res.get("tiktok_safe"),
+        batches = [frames_b64[i : i + GROQ_VISION_MAX_IMAGES] for i in range(0, len(frames_b64), GROQ_VISION_MAX_IMAGES)]
+        for batch in batches:
+            try:
+                vision_res = _call_groq_vision_moderation(
+                    frames_b64=batch,
+                    title=title,
+                    transcript_text=transcript_text,
+                    api_key=api_key,
                 )
-        except Exception as exc:
-            logger.warning("Moderação visual via Groq falhou, usando heurística textual (%s)", exc)
+                if not vision_res:
+                    continue
+                vision_ok = True
+                v_level = str(vision_res.get("exposure_level") or "clean").strip().lower()
+                if v_level not in severity_rank:
+                    v_level = "explicit_indecent"
+                if severity_rank[v_level] >= severity_rank.get(worst_level, 0):
+                    worst_level = v_level
+                    worst_reason = str(vision_res.get("reason") or worst_reason)
+                    worst_vision = vision_res
+                if worst_level == "explicit_indecent":
+                    return build_decision_from_level(
+                        "explicit_indecent",
+                        requested_platforms,
+                        worst_reason,
+                        vision_checked=True,
+                    )
+            except Exception as exc:
+                logger.warning("Moderação visual via Groq falhou em um lote (%s)", exc)
 
-    return build_decision_from_level(text_level, requested_platforms, text_reason)
+    if worst_level in {"explicit_indecent", "mild_body_exposure"}:
+        return build_decision_from_level(worst_level, requested_platforms, worst_reason, vision_checked=vision_ok)
+
+    if worst_vision is not None:
+        return build_decision_from_level(
+            worst_level,
+            requested_platforms,
+            worst_reason,
+            ig_override=worst_vision.get("instagram_safe"),
+            yt_override=worst_vision.get("youtube_shorts_safe"),
+            tt_override=worst_vision.get("tiktok_safe"),
+            vision_checked=vision_ok,
+        )
+
+    return build_decision_from_level(worst_level, requested_platforms, worst_reason, vision_checked=vision_ok)

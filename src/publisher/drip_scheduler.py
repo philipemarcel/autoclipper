@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from src.ai.content_moderator import moderate_video_for_platforms
 from src.ai.deduplicator import find_duplicate_cut
 from src.models import ProfileConfig
 from src.publisher.facebook_reels import FacebookReelsPublisher
@@ -410,6 +411,7 @@ class DripScheduler:
         processed_state: Dict[str, Any],
         work_dir: Path,
         now_utc: Optional[datetime] = None,
+        force_next: bool = False,
     ) -> List[Dict[str, Any]]:
         now = now_utc or datetime.now(timezone.utc)
         state = self._load_queue_state()
@@ -417,7 +419,15 @@ class DripScheduler:
 
         completed_reports: List[Dict[str, Any]] = []
         changed = False
+        forced_used = False
         min_spacing_profiles: Dict[str, datetime] = {}
+
+        published_queue_items = [it for it in state.get("items", []) if it.get("status") == "published"]
+        published_cuts = [
+            c
+            for c in processed_state.get("cuts", [])
+            if c.get("status") == "published" or any(p.get("cut_id") == c.get("cut_id") for p in published_queue_items)
+        ]
 
         # Ordena pendentes por horário agendado para sempre respeitar a fila em ordem cronológica
         pending_ordered = sorted(
@@ -427,8 +437,9 @@ class DripScheduler:
 
         for item in pending_ordered:
             due_dt = _parse_iso(item["scheduled_for"])
+            can_force_now = force_next and not forced_used
             # Tolerância de 120s para jitter/atraso do cron do GitHub Actions
-            if (due_dt - now).total_seconds() > 120:
+            if not can_force_now and (due_dt - now).total_seconds() > 120:
                 continue
 
             prof = profiles_by_id.get(item["profile_id"])
@@ -443,6 +454,26 @@ class DripScheduler:
                 item["status"] = "skipped_missing"
                 changed = True
                 continue
+
+            existing_res = dict(item.get("results") or {})
+            # Barreira em tempo de publicação contra duplicatas herdadas da fila antiga
+            if not existing_res:
+                dup = find_duplicate_cut(
+                    cut_dict,
+                    processed_state={"cuts": published_cuts},
+                    queue_state={"items": published_queue_items},
+                )
+                if dup.is_duplicate:
+                    logger.warning(
+                        "Corte pendente %s bloqueado na publicação (duplicata de %s): %s",
+                        item["cut_id"],
+                        dup.matched_cut_id or "corte já publicado",
+                        dup.reason,
+                    )
+                    item["status"] = "skipped_duplicate"
+                    item["last_error"] = f"Duplicata bloqueada antes de postar ({dup.reason})"
+                    changed = True
+                    continue
 
             eff_minutes = self.get_effective_interval_minutes(prof, state)
             interval = timedelta(minutes=eff_minutes)
@@ -460,7 +491,7 @@ class DripScheduler:
                 item["scheduled_for"] = _to_iso_utc(next_slot)
                 changed = True
                 continue
-            if last_dt is not None and (now - last_dt) < min_gap:
+            if not can_force_now and last_dt is not None and (now - last_dt) < min_gap:
                 next_slot = self._push_past_quiet_hours(last_dt + interval, quiet_hours, tz)
                 if next_slot <= now:
                     next_slot = self._push_past_quiet_hours(now + timedelta(minutes=eff_minutes), quiet_hours, tz)
@@ -469,10 +500,12 @@ class DripScheduler:
                 changed = True
                 continue
 
+            if can_force_now:
+                forced_used = True
+
             try:
                 if item.get("caption"):
                     cut_dict["caption"] = str(item["caption"])
-                existing_res = dict(item.get("results") or {})
                 res, failed_plats, plat_errors = self._execute_publish_resilient(
                     prof,
                     cut_dict,
@@ -480,6 +513,12 @@ class DripScheduler:
                     work_dir,
                     existing_results=existing_res,
                 )
+                if "moderation" in plat_errors:
+                    item["status"] = "blocked_nudity"
+                    item["last_error"] = plat_errors["moderation"][:500]
+                    changed = True
+                    self._save_queue_state(state)
+                    continue
                 item["results"] = res
                 posted_content = any(
                     res.get(k) for k in ("instagram_reel_id", "facebook_reel_id", "tiktok_publish_id", "youtube_short_url")
@@ -499,6 +538,8 @@ class DripScheduler:
                     item.pop("last_error", None)
                     item.pop("platform_errors", None)
                     cut_dict["status"] = "published"
+                    published_cuts.append(cut_dict)
+                    published_queue_items.append(item)
                     completed_reports.append({"item": item, "cut": cut_dict, "results": res})
                 else:
                     # Preserva o sucesso parcial e NUNCA re-publica nas plataformas que já receberam o vídeo
@@ -576,10 +617,28 @@ class DripScheduler:
         self.store.download_file_by_ref(cut_dict["master_file_id"], local_master)
 
         caption = str(cut_dict.get("caption", ""))
+        requested_canon = [self._canonical_platform(p) for p in platforms]
+
+        # Barreira de moderação visual real no arquivo baixado (reavalia itens antigos ou sem vision_checked)
+        mod_info = cut_dict.get("moderation") if isinstance(cut_dict.get("moderation"), dict) else {}
+        if not mod_info.get("vision_checked"):
+            moderation = moderate_video_for_platforms(
+                video_path=local_master,
+                requested_platforms=platforms,
+                title=f"{cut_dict.get('dominant_title') or ''} {caption}",
+                transcript_text=str(cut_dict.get("transcript_snippet") or ""),
+            )
+            cut_dict["moderation"] = moderation.to_dict()
+            cut_dict["_dirty_moderation"] = True
+            if not moderation.allowed_platforms:
+                logger.warning("Corte %s bloqueado por nudismo/decência antes de postar: %s", cut_dict["cut_id"], moderation.reason)
+                return dict(existing_results or {}), [], {"moderation": moderation.reason}
+            allowed_canon = {self._canonical_platform(p) for p in moderation.allowed_platforms}
+            requested_canon = [p for p in requested_canon if p in allowed_canon]
+
         results: Dict[str, str] = dict(existing_results or {})
         failed_platforms: List[str] = []
         platform_errors: Dict[str, str] = {}
-        requested_canon = [self._canonical_platform(p) for p in platforms]
 
         # 1. Instagram Reels
         if "instagram" in requested_canon and profile.publishing.instagram.enabled:

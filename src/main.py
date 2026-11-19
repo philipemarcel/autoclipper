@@ -769,7 +769,7 @@ def cmd_discord_action(
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def cmd_drip_publish() -> int:
+def cmd_drip_publish(force_next: bool = False) -> int:
     if _is_unconfigured_ci():
         logger.info("Aguardando configuração inicial (`/setup iniciar` ou GDRIVE_TOKEN_JSON nos Secrets).")
         return 0
@@ -780,8 +780,10 @@ def cmd_drip_publish() -> int:
 
     try:
         scheduler = DripScheduler(store)
-        reports = scheduler.process_due_queue(profiles, processed_state, work_dir)
-        if reports:
+        reports = scheduler.process_due_queue(profiles, processed_state, work_dir, force_next=force_next)
+        if reports or any(c.get("_dirty_moderation") for c in processed_state.get("cuts", [])):
+            for c in processed_state.get("cuts", []):
+                c.pop("_dirty_moderation", None)
             store.save_state_json(PROCESSED_STATE_FILE, processed_state)
             for rep in reports:
                 cut = rep["cut"]
@@ -852,7 +854,8 @@ def build_cli() -> argparse.ArgumentParser:
     p_kick.add_argument("--range", type=str, default="", help="Trecho opcional (ex: 12:30-15:00).")
     p_kick.add_argument("--profile", type=str, default=None)
 
-    sub.add_parser("drip-publish", help="Publica cortes vencidos na Fila Espaçada Inteligente.")
+    p_drip = sub.add_parser("drip-publish", help="Publica cortes vencidos na Fila Espaçada Inteligente.")
+    p_drip.add_argument("--force", action="store_true", help="Publica imediatamente o próximo corte elegível da fila.")
 
     p_clean = sub.add_parser("cleanup", help="Remove do Google Drive vídeos mais antigos que N dias.")
     p_clean.add_argument("--days", type=int, default=None, help="Dias de retenção (padrão: config de profiles.yaml).")
@@ -896,7 +899,7 @@ def main() -> None:
             time_range=args.time_range,
         )
     elif args.command == "drip-publish":
-        cmd_drip_publish()
+        cmd_drip_publish(force_next=bool(args.force))
     elif args.command == "cleanup":
         cmd_cleanup(retention_days=args.days)
     elif args.command == "colab-loop":

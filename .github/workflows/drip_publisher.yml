@@ -5,6 +5,11 @@ on:
     # Verifica a cada 20 minutos se há cortes aprovados cujo horário agendado já chegou
     - cron: "5,25,45 * * * *"
   workflow_dispatch:
+    inputs:
+      force_immediate:
+        description: "Forçar publicação imediata do próximo corte pendente (true/false)"
+        required: false
+        default: "false"
 
 concurrency:
   group: drip-publisher-loop
@@ -33,6 +38,7 @@ jobs:
       - name: Publish Due Cuts from Smart Drip Queue
         env:
           AUTOCLIPPER_PROFILES_JSON: ${{ secrets.AUTOCLIPPER_PROFILES_JSON }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GDRIVE_TOKEN_JSON: ${{ secrets.GDRIVE_TOKEN_JSON }}
           GDRIVE_ROOT_FOLDER_NAME: ${{ secrets.GDRIVE_ROOT_FOLDER_NAME || vars.GDRIVE_ROOT_FOLDER_NAME || 'TwitchAutoClipper' }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
@@ -50,4 +56,8 @@ jobs:
           TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
         run: |
-          python -m src.main drip-publish
+          ARGS=("drip-publish")
+          if [ "${{ inputs.force_immediate }}" = "true" ]; then
+            ARGS+=("--force")
+          fi
+          python -m src.main "${ARGS[@]}"
