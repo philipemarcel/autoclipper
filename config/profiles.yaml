@@ -1,110 +1,73 @@
-# ==============================================================================
-# PERFIS DE CRIADORES MONITORADOS
-# Comece com 1 criador hoje; para expandir depois, basta duplicar o bloco abaixo
-# em `profiles:` (apontando para as mesmas contas ou contas novas de Reels/TikTok).
-# ==============================================================================
-
 profiles:
-  - id: "criador_01"
-    enabled: true
-    # Login exato da URL na Twitch (ex: twitch.tv/alanzoka -> "alanzoka")
-    twitch_login: "alanzoka"
-    display_name: "Alanzoka"
-    language: "pt"
-    # Canais do YouTube monitorados 24/7 (vídeos novos + lives + repescagem de lives encerradas)
-    youtube_channels:
-      - "https://www.youtube.com/@Gameplayrj"
-      - "https://www.youtube.com/@PaulinhoLOKOoficial"
-    # Canais da Kick monitorados 24/7 (clipes em alta + lives ao vivo + repescagem de VODs)
-    kick_channels:
-      - "https://kick.com/davyjones"
-      - "https://kick.com/bistecone"
-
-    detection:
-      # Agrupa múltiplos clipes criados pela comunidade na mesma janela temporal (segundos)
-      cluster_window_seconds: 75
-      # Modo Quente (durante a live): dispara se N pessoas cliparem o mesmo minuto OU 1 clipe explodir
-      min_clips_live_cluster: 3
-      min_views_single_clip_live: 80
-      # Modo Repescagem (pós-live): pega os mais vistos da sessão encerrada sem repetir trechos
-      min_views_post_live: 120
-      # Faz repescagem apenas das lives/VODs mais recentes (horas máximas atrás: 36h)
-      recap_hours: 36
-      # Alto volume: meta de 8 a 15 cortes por live
-      max_cuts_per_stream: 15
-      max_cuts_per_run: 4
-      # Evita gerar dois cortes sobrepostos do mesmo momento (segundos de distância mínima no VOD)
-      dedup_overlap_seconds: 50
-      # Folga de contexto extraída do VOD público antes e depois do pico (segundos)
-      vod_padding_before_seconds: 45
-      vod_padding_after_seconds: 45
-
-    editing:
-      # Permite até 65s para preservar 100% dos clipes de até 60s da Twitch sem cortar início nem fim
-      max_duration_seconds: 65.0
-      min_duration_seconds: 16.0
-      # Mantém o clipe original de referência 100% íntegro do segundo 0.0 até o final (sem amputar pontas)
-      cold_open_enabled: false
-      cold_open_min_main_duration: 22.0
-      cold_open_min_seconds: 2.0
-      cold_open_max_seconds: 3.2
-      # Auto-Layout 9:16: "auto" alterna sozinho entre split_screen, face_track e blur_center
-      layout_mode: "auto"
-      # Opcional: se quiser travar manualmente a caixa da webcam [x, y, w, h] em proporção 0.0-1.0, preencha aqui
-      fixed_webcam_box: null
-      # Sem marca d'água (100% limpo conforme definido)
-      watermark_text: ""
-
-    copy:
-      # Legenda natural em 1 linha baseada no que o streamer falou + hashtags de nicho (sem #fyp/#viral genéricos)
-      style: "minimal_meme"
-      max_hashtags: 5
-      base_hashtags:
-        - "#cortesdegames"
-        - "#gamerbrasil"
-        - "#humorgamer"
-        - "#clips"
-
-    discord:
-      bot_token_env: "DISCORD_BOT_TOKEN"
-      channel_id_env: "DISCORD_CHANNEL_ID"
-
-    publishing:
-      # Fila Espaçada Inteligente: 1 post a cada 75 min (1h15) para não canibalizar alcance com 8-15 cortes
-      drip_interval_minutes: 75
-      # Horário de silêncio na madrugada + manhã fraca (BRT): publica a partir das 10:05 BRT nos horários de maior pico do Reels
-      quiet_hours_brt: [0, 10]
-      timezone: "America/Sao_Paulo"
-      # Exclui automaticamente os arquivos de vídeo do Google Drive após N dias (preservando histórico contra repetição)
-      drive_retention_days: 10
-
-      instagram:
-        enabled: true
-        account_id_env: "IG_ACCOUNT_ID"
-        access_token_env: "IG_ACCESS_TOKEN"
-        share_to_feed: true
-        trial_mode: ""  # Opcional: "SS_PERFORMANCE" para testar Trial Reels automático para não-seguidores
-
-      facebook:
-        enabled: true
-        page_id_env: "FB_PAGE_ID"
-        access_token_env: "FB_ACCESS_TOKEN"
-
-      tiktok:
-        enabled: true
-        # "direct" = envia via Direct Post (/video/init/) com legenda/hashtags já anexadas no TikTok!
-        # Nota TikTok pré-aprovação: antes de aprovar o app em Production, só funciona com `privacy_level: "SELF_ONLY"`
-        # E com sua conta do TikTok em modo Privado (assim você só muda a visibilidade no app e posta sem digitar nada).
-        # Se a sua conta estiver Pública antes da aprovação, `fallback_to_inbox: true` envia para a Caixa de Entrada sem quebrar.
-        # Após o TikTok aprovar o app em Production, troque `privacy_level` para "PUBLIC_TO_EVERYONE".
-        mode: "direct"
-        privacy_level: "SELF_ONLY"
-        fallback_to_inbox: true
-        access_token_env: "TIKTOK_ACCESS_TOKEN"
-
-      youtube_shorts:
-        # Pausado temporariamente ate reconectar o canal correto com scripts/auth_youtube.py --save
-        enabled: true
-        privacy_status: "public"
-        category_id: "20"
-        token_json_env: "YOUTUBE_TOKEN_JSON"
+- id: criador_01
+  enabled: true
+  twitch_login: alanzoka
+  display_name: Alanzoka
+  language: pt
+  youtube_channels:
+  - https://www.youtube.com/@Gameplayrj
+  - https://www.youtube.com/@PaulinhoLOKOoficial
+  kick_channels:
+  - https://kick.com/davyjones
+  - https://kick.com/bistecone
+  - https://kick.com/paulinholokobr
+  detection:
+    cluster_window_seconds: 75
+    min_clips_live_cluster: 3
+    min_views_single_clip_live: 80
+    min_views_post_live: 120
+    recap_hours: 36
+    max_cuts_per_stream: 15
+    max_cuts_per_run: 4
+    dedup_overlap_seconds: 50
+    vod_padding_before_seconds: 45
+    vod_padding_after_seconds: 45
+  editing:
+    max_duration_seconds: 65.0
+    min_duration_seconds: 16.0
+    cold_open_enabled: false
+    cold_open_min_main_duration: 22.0
+    cold_open_min_seconds: 2.0
+    cold_open_max_seconds: 3.2
+    layout_mode: auto
+    fixed_webcam_box: null
+    watermark_text: ''
+  copy:
+    style: minimal_meme
+    max_hashtags: 5
+    base_hashtags:
+    - '#cortesdegames'
+    - '#gamerbrasil'
+    - '#humorgamer'
+    - '#clips'
+  discord:
+    bot_token_env: DISCORD_BOT_TOKEN
+    channel_id_env: DISCORD_CHANNEL_ID
+  publishing:
+    drip_interval_minutes: 75
+    quiet_hours_brt:
+    - 0
+    - 10
+    timezone: America/Sao_Paulo
+    drive_retention_days: 10
+    instagram:
+      enabled: true
+      account_id_env: IG_ACCOUNT_ID
+      access_token_env: IG_ACCESS_TOKEN
+      share_to_feed: true
+      trial_mode: ''
+    facebook:
+      enabled: true
+      page_id_env: FB_PAGE_ID
+      access_token_env: FB_ACCESS_TOKEN
+    tiktok:
+      enabled: true
+      mode: direct
+      privacy_level: SELF_ONLY
+      fallback_to_inbox: true
+      access_token_env: TIKTOK_ACCESS_TOKEN
+    youtube_shorts:
+      enabled: true
+      privacy_status: public
+      category_id: '20'
+      token_json_env: YOUTUBE_TOKEN_JSON
