@@ -56,10 +56,12 @@ profiles:
       access_token_env: IG_ACCESS_TOKEN
       share_to_feed: true
       trial_mode: ''
+      drip_interval_minutes: 240
     facebook:
       enabled: true
       page_id_env: FB_PAGE_ID
       access_token_env: FB_ACCESS_TOKEN
+      drip_interval_minutes: 240
     tiktok:
       enabled: true
       mode: direct

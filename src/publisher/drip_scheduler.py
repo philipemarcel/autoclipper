@@ -1133,7 +1133,13 @@ class DripScheduler:
                 try:
                     fb = FacebookReelsPublisher(profile)
                     if fb.is_ready and fb.has_publish_permission():
-                        results["facebook_reel_id"] = fb.publish_reel(local_master, caption)
+                        results["facebook_reel_id"] = fb.publish_reel(
+                            local_master,
+                            caption,
+                            title_hint=str(cut_dict.get("teaser_headline") or cut_dict.get("dominant_title") or ""),
+                            creator_name=str(cut_dict.get("creator_name") or ""),
+                            game_name=str(cut_dict.get("game_name") or ""),
+                        )
                     elif fb.is_ready:
                         logger.warning(
                             "Facebook Page detectado, mas token ainda sem permissão `pages_manage_posts`; defina FB_ACCESS_TOKEN."

@@ -2318,3 +2318,25 @@ def test_advancing_post_pulls_subsequent_queue_slots_to_interval(tmp_path: Path,
     assert by_id2["adv_3::instagram"]["scheduled_for"] == "2026-11-20T00:00:00Z"
 
 
+def test_meta_reels_caption_sanitizes_profanity_and_blocks_hashtag_only():
+    from src.publisher.facebook_reels import FacebookReelsPublisher
+    from src.publisher.instagram_reels import InstagramReelsPublisher
+
+    ig_profane = InstagramReelsPublisher.build_reels_metadata(
+        caption="não comprei o jogo, fudeu caralho\n\n#bistecone #gta6",
+        creator_name="Bistecone",
+    )
+    assert "fudeu" not in ig_profane["caption"].lower()
+    assert "caralho" not in ig_profane["caption"].lower()
+    assert "deu ruim" in ig_profane["hook_line"].lower()
+
+    fb_hashtag_only = FacebookReelsPublisher.build_facebook_caption(
+        caption="#bistecone #cortesdegames #gamerbrasil #humorgamer #clips",
+        creator_name="Bistecone",
+    )
+    first_line = fb_hashtag_only.splitlines()[0]
+    assert not first_line.startswith("#")
+    assert "bistecone" in first_line.lower()
+
+
+

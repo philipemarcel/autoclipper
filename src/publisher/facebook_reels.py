@@ -8,6 +8,7 @@ import requests
 
 from src.config_loader import get_env_secret
 from src.models import ProfileConfig
+from src.publisher.instagram_reels import InstagramReelsPublisher
 
 logger = logging.getLogger(__name__)
 
@@ -99,10 +100,42 @@ class FacebookReelsPublisher:
             )
         return self.page_id, self.user_or_page_token
 
-    def publish_reel(self, video_path: Path, caption: str) -> str:
+    @staticmethod
+    def build_facebook_caption(
+        caption: str,
+        title_hint: str = "",
+        creator_name: str = "",
+        game_name: str = "",
+    ) -> str:
+        """Formata legenda limpa para Facebook Reels (sem texto vazio só com hashtags e sem palavrões explícitos)."""
+        meta = InstagramReelsPublisher.build_reels_metadata(
+            caption=caption,
+            title_hint=title_hint,
+            creator_name=creator_name,
+            game_name=game_name,
+        )
+        parts = [meta["hook_line"]]
+        if meta["hashtags"]:
+            parts.append(" ".join(meta["hashtags"]))
+        return "\n\n".join(parts)[:2000]
+
+    def publish_reel(
+        self,
+        video_path: Path,
+        caption: str,
+        title_hint: str = "",
+        creator_name: str = "",
+        game_name: str = "",
+    ) -> str:
         if not self.is_ready:
             raise RuntimeError("Facebook Reels não configurado (FB_PAGE_ID / FB_ACCESS_TOKEN ausentes).")
 
+        clean_caption = self.build_facebook_caption(
+            caption=caption,
+            title_hint=title_hint,
+            creator_name=creator_name,
+            game_name=game_name,
+        )
         page_id, page_token = self._resolve_page_credentials()
         video_bytes = video_path.read_bytes()
         file_size = len(video_bytes)
@@ -147,7 +180,7 @@ class FacebookReelsPublisher:
                 "upload_phase": "finish",
                 "video_id": video_id,
                 "video_state": "PUBLISHED",
-                "description": caption[:2000],
+                "description": clean_caption,
                 "access_token": page_token,
             },
             timeout=45,
@@ -157,7 +190,7 @@ class FacebookReelsPublisher:
             with open(video_path, "rb") as fh:
                 vid_resp = requests.post(
                     f"{GRAPH_VIDEO_BASE}/{page_id}/videos",
-                    data={"description": caption[:2000], "access_token": page_token},
+                    data={"description": clean_caption, "access_token": page_token},
                     files={"source": (video_path.name, fh, "video/mp4")},
                     timeout=300,
                 )

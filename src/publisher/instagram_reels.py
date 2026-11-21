@@ -59,6 +59,31 @@ _SENDS_SAVES_MICRO_CTAS = (
     "manda no grupo que ia rir disso",
 )
 
+# Suaviza palavrões explícitos na legenda para evitar rebaixamento no algoritmo de recomendações da Meta
+_META_PROFANITY_REPLACEMENTS = (
+    (r"\bputa\s+que\s+pariu\b", "meu deus"),
+    (r"\bfilh[oa]\s+da\s+puta\b", "maluco"),
+    (r"\bvai\s+tomar\s+no\s+cu\b", "que absurdo"),
+    (r"\btomar\s+no\s+cu\b", "que absurdo"),
+    (r"\bfoda[\s-]*se\b", "nem aí"),
+    (r"\bfud[eu][uo]\b|\bfod[eu][uo]\b", "deu ruim"),
+    (r"\bcaralh[oa]s?\b", "caramba"),
+    (r"\bporras?\b", "nossa"),
+    (r"\bmerdas?\b", "droga"),
+    (r"\bcacet[ea]s?\b", "caramba"),
+    (r"\barrombad[oa]s?\b", "maluco"),
+    (r"\bbucet[ao]s?\b", "loucura"),
+    (r"\bputas?\b", "absurdo"),
+)
+
+
+def sanitize_meta_caption_text(text: str) -> str:
+    """Suaviza palavrões explícitos preservando o tom natural da legenda para Reels (IG/FB)."""
+    cleaned = str(text or "")
+    for pattern, replacement in _META_PROFANITY_REPLACEMENTS:
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
 
 def _slugify_tag(text: str) -> str:
     raw = str(text or "").strip().lower()
@@ -183,17 +208,24 @@ class InstagramReelsPublisher:
         raw_caption = str(caption or "").strip()
         lines = [ln.strip() for ln in raw_caption.splitlines() if ln.strip()]
         non_tag_lines = [ln for ln in lines if not all(tok.startswith("#") for tok in ln.split())]
-        raw_hook = (non_tag_lines[0] if non_tag_lines else str(title_hint or "momento absurdo na live")).strip()
+        raw_hook = (non_tag_lines[0] if non_tag_lines else str(title_hint or "")).strip()
         hook_clean = re.sub(r"#\S+", "", raw_hook)
-        hook_clean = re.sub(r"\s+", " ", hook_clean).strip()
+        hook_clean = sanitize_meta_caption_text(hook_clean)
         hook_clean = re.sub(
             r"\s*(?:o que (?:vocês|vcs) acharam\??|comenta aí!?)\s*$",
             "",
             hook_clean,
             flags=re.IGNORECASE,
         ).strip()
-        if not hook_clean:
-            hook_clean = (re.sub(r"#\S+", "", str(title_hint or "")).strip() or "momento absurdo na live").lower()
+        if not hook_clean or len(hook_clean) < 4:
+            fallback_hint = sanitize_meta_caption_text(re.sub(r"#\S+", "", str(title_hint or "")))
+            clean_creator_tmp = re.sub(r"\s+", " ", str(creator_name or "").strip())
+            if fallback_hint and len(fallback_hint) >= 4:
+                hook_clean = fallback_hint.lower()
+            elif clean_creator_tmp:
+                hook_clean = f"olha essa reação do {clean_creator_tmp} na live"
+            else:
+                hook_clean = "momento absurdo na live"
 
         if len(hook_clean) > 98:
             cut_at = hook_clean.rfind(" ", 0, 95)
