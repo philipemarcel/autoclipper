@@ -33,15 +33,16 @@ DEFAULT_NICHE_KEYWORDS = [
 def compute_youtube_publish_at(
     now_utc: Optional[datetime] = None,
     min_wait_minutes: int = 25,
-    avoid_afternoon_crowd: bool = True,
+    avoid_afternoon_crowd: bool = False,
     tz_name: str = "America/Sao_Paulo",
 ) -> str:
     """
     Agenda a liberação pública (`publishAt`) no YouTube:
-      - Sobe sempre em `private` e espera no mínimo 25 min (`min_wait_minutes`) para o YouTube
-        processar a qualidade HD completa antes de ficar público.
-      - Se cair na janela congestionada da tarde (12h-17h59 BRT), adia para a noite (19h-22h BRT)
-        com pequeno escalonamento de minutos para maximizar entrega.
+      - Sobe em `private` e espera `min_wait_minutes` (padrão 25 min) para o YouTube
+        processar a qualidade HD completa antes de ficar público, preservando exatamente
+        o espaçamento definido pela fila do YouTube (evita rajadas/colapso na mesma hora).
+      - Se `avoid_afternoon_crowd=True` for solicitado explicitamente, desloca linearmente (+6h)
+        em vez de empilhar vários vídeos no mesmo horário.
     """
     now = now_utc or datetime.now(timezone.utc)
     wait = max(20, int(min_wait_minutes))
@@ -51,10 +52,8 @@ def compute_youtube_publish_at(
         tz = ZoneInfo(tz_name)
         local_dt = target_utc.astimezone(tz)
         if 12 <= local_dt.hour < 18:
-            # Move para janela noturna recomendada (19h / 21h / 22h BRT), preservando espaçamento
-            slot_hour = 19 if local_dt.hour < 15 else (21 if local_dt.hour < 17 else 22)
-            local_dt = local_dt.replace(hour=slot_hour, minute=min(55, local_dt.minute), second=0, microsecond=0)
-            target_utc = local_dt.astimezone(timezone.utc)
+            # Deslocamento linear de +6h preserva o intervalo original entre vídeos sem empilhar
+            target_utc = target_utc + timedelta(hours=6)
 
     return target_utc.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -190,48 +189,59 @@ class YouTubeShortsPublisher:
         creator_name: str = "",
         publish_at: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Monta título chamativo (#Shorts único), descrição SEO (resumo + keywords separadas por vírgula) e até 15 tags."""
+        """Monta título natural (sem truncar com '...' nem CAPS artificial), descrição limpa (sem keyword stuffing) e tags relevantes."""
         raw_caption = str(caption or "").strip()
         lines = [ln.strip() for ln in raw_caption.splitlines() if ln.strip()]
         non_tag_lines = [ln for ln in lines if not all(tok.startswith("#") for tok in ln.split())]
         hook_line = (non_tag_lines[0] if non_tag_lines else str(title_hint or "Momento insano na live")).strip()
         hook_clean = re.sub(r"#\S+", "", hook_line).strip() or "Momento insano na live"
+        hook_clean = re.sub(r"\s+", " ", hook_clean)
 
-        # 1) Título: 3-4 primeiras palavras em MAIÚSCULAS + apenas #Shorts (evita spam de hashtags)
-        emphasized = YouTubeShortsPublisher._emphasize_opening_words(hook_clean, count=4)
-        if len(emphasized) > 48:
-            cut_at = emphasized.rfind(" ", 0, 46)
-            emphasized = emphasized[: (cut_at if cut_at > 20 else 46)].rstrip(" ,;:") + "..."
-        final_title = f"{emphasized} #Shorts"
+        # 1) Título natural (até 72 chars, sem CAPS forçado e sem cortar frase com '...' no meio)
+        candidate = hook_clean[0].upper() + hook_clean[1:] if len(hook_clean) > 1 else hook_clean
+        clean_hint = re.sub(r"#\S+", "", str(title_hint or "")).strip()
+        if len(candidate) > 72:
+            if clean_hint and 8 <= len(clean_hint) <= 72:
+                candidate = clean_hint[0].upper() + clean_hint[1:].lower() if clean_hint.isupper() else clean_hint
+            else:
+                cut_at = candidate.rfind(" ", 0, 70)
+                candidate = candidate[: (cut_at if cut_at > 25 else 70)].rstrip(" ,;:-")
+        final_title = candidate[:100]
 
-        # 2) Extração de palavras-chave (SEO) e tags abundantes
+        # 2) Tags relevantes e moderadas (até 10 tags, sem palavras soltas genéricas)
         found_tags: List[str] = []
+        caption_hashtags: List[str] = []
         if creator_name.strip():
             found_tags.append(creator_name.strip())
         for match in re.findall(r"#([A-Za-zÀ-ÿ0-9_]{2,30})", raw_caption):
-            if match.lower() not in {t.lower() for t in found_tags}:
+            low = match.lower()
+            if low not in {t.lower() for t in found_tags}:
                 found_tags.append(match)
+            if low not in {"fyp", "viral", "foryou", "shorts"} and low not in {h.lower() for h in caption_hashtags}:
+                caption_hashtags.append(match)
         for kw in DEFAULT_NICHE_KEYWORDS:
             if kw.lower() not in {t.lower() for t in found_tags}:
                 found_tags.append(kw)
-        for word in re.findall(r"[A-Za-zÀ-ÿ0-9]{4,}", hook_clean.lower()):
-            if word not in {t.lower() for t in found_tags}:
-                found_tags.append(word)
+        found_tags = found_tags[:9]
         if "shorts" not in {t.lower() for t in found_tags}:
             found_tags.append("Shorts")
-        found_tags = found_tags[:15]
 
-        # 5 a 6 palavras-chave relevantes separadas por vírgula na descrição (SEO do YouTube)
-        seo_keywords = [t for t in found_tags if t.lower() != "shorts"][:6]
-        keywords_line = ", ".join(seo_keywords)
+        # 3) Descrição limpa e humana (sem bloco "Palavras-chave: ..." que dispara filtro anti-spam do YouTube)
         summary_sentence = hook_clean[0].upper() + hook_clean[1:] if len(hook_clean) > 1 else hook_clean
-        description = f"{summary_sentence}\n\nPalavras-chave: {keywords_line}\n\n#Shorts".strip()
+        desc_hashtags = [f"#{h}" for h in caption_hashtags[:3]]
+        if "#Shorts" not in desc_hashtags and "#shorts" not in [h.lower() for h in desc_hashtags]:
+            desc_hashtags.append("#Shorts")
+        desc_parts = [summary_sentence]
+        if creator_name.strip() and creator_name.strip().lower() not in summary_sentence.lower():
+            desc_parts.append(f"Criador: {creator_name.strip()}")
+        desc_parts.append(" ".join(desc_hashtags))
+        description = "\n\n".join(desc_parts).strip()
 
         status_block: Dict[str, Any] = {
             "privacyStatus": privacy_status,
             "selfDeclaredMadeForKids": False,
         }
-        # Se publish_at fornecido (ex: +25 min e fora da tarde), exige privacyStatus="private" na API v3
+        # Se publish_at fornecido (ex: +25 min para processamento HD), exige privacyStatus="private" na API v3
         if publish_at and privacy_status == "public":
             status_block["privacyStatus"] = "private"
             status_block["publishAt"] = publish_at

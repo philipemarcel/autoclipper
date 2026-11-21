@@ -275,14 +275,6 @@ class DripScheduler:
                 except (TypeError, ValueError):
                     pass
 
-        override = q_state.get("drip_interval_override_minutes")
-        if override is not None:
-            try:
-                return max(5, min(1440, int(override)))
-            except (TypeError, ValueError):
-                pass
-
-        if canon:
             plat_cfg_map = {
                 "instagram": getattr(profile.publishing, "instagram", None),
                 "facebook": getattr(profile.publishing, "facebook", None),
@@ -296,6 +288,13 @@ class DripScheduler:
                     return max(5, min(1440, int(plat_min)))
                 except (TypeError, ValueError):
                     pass
+
+        override = q_state.get("drip_interval_override_minutes")
+        if override is not None:
+            try:
+                return max(5, min(1440, int(override)))
+            except (TypeError, ValueError):
+                pass
 
         return max(5, int(profile.publishing.drip_interval_minutes))
 

@@ -1176,23 +1176,34 @@ def test_youtube_shorts_publisher_metadata_and_discord_buttons(tmp_path: Path, m
         title_hint="GOLFINHOS NO GTA 6",
         creator_name="Davy Jones",
     )
-    assert len(meta["snippet"]["title"]) <= 58
-    assert meta["snippet"]["title"].startswith("DAVY JONES IMPRESSIONADO COM")
-    assert meta["snippet"]["title"].count("#") == 1
-    assert "#Shorts" in meta["snippet"]["title"]
-    assert "Palavras-chave:" in meta["snippet"]["description"]
+    assert len(meta["snippet"]["title"]) <= 72
+    assert meta["snippet"]["title"] == "Davy jones impressionado com golfinhos no gta 6"
+    assert "#" not in meta["snippet"]["title"]
+    assert "..." not in meta["snippet"]["title"]
+    assert "Palavras-chave:" not in meta["snippet"]["description"]
     assert "#Shorts" in meta["snippet"]["description"]
     assert meta["snippet"]["categoryId"] == "20"
-    assert len(meta["snippet"]["tags"]) >= 8
+    assert 4 <= len(meta["snippet"]["tags"]) <= 10
     assert "davyjones" in meta["snippet"]["tags"]
     assert "Shorts" in meta["snippet"]["tags"]
     assert meta["status"]["privacyStatus"] == "public"
 
-    # Dica do vídeo: aguardar 25 min para processamento HD + evitar tarde (12h-18h BRT -> 19h+ BRT)
-    afternoon_utc = datetime(2026, 11, 19, 16, 10, 0, tzinfo=timezone.utc)  # 13:10 BRT
-    pub_at_afternoon = compute_youtube_publish_at(now_utc=afternoon_utc)
-    dt_brt = datetime.fromisoformat(pub_at_afternoon.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Sao_Paulo"))
-    assert dt_brt.hour >= 19
+    # compute_youtube_publish_at preserva exatamente o espaçamento da fila (nunca empilha na mesma hora!)
+    t_a = datetime(2026, 11, 19, 15, 10, 0, tzinfo=timezone.utc)  # 12:10 BRT
+    t_b = datetime(2026, 11, 19, 16, 10, 0, tzinfo=timezone.utc)  # 13:10 BRT
+    pub_a = compute_youtube_publish_at(now_utc=t_a)
+    pub_b = compute_youtube_publish_at(now_utc=t_b)
+    dt_a = datetime.fromisoformat(pub_a.replace("Z", "+00:00"))
+    dt_b = datetime.fromisoformat(pub_b.replace("Z", "+00:00"))
+    assert (dt_a - t_a).total_seconds() == 25 * 60
+    assert (dt_b - dt_a).total_seconds() == 60 * 60
+
+    # Mesmo se avoid_afternoon_crowd=True for pedido, o deslocamento é linear (+6h) sem empilhar
+    pub_a_shift = compute_youtube_publish_at(now_utc=t_a, avoid_afternoon_crowd=True)
+    pub_b_shift = compute_youtube_publish_at(now_utc=t_b, avoid_afternoon_crowd=True)
+    dt_as = datetime.fromisoformat(pub_a_shift.replace("Z", "+00:00"))
+    dt_bs = datetime.fromisoformat(pub_b_shift.replace("Z", "+00:00"))
+    assert (dt_bs - dt_as).total_seconds() == 60 * 60
 
     night_utc = datetime(2026, 11, 19, 23, 0, 0, tzinfo=timezone.utc)  # 20:00 BRT
     pub_at_night = compute_youtube_publish_at(now_utc=night_utc)
@@ -1204,9 +1215,10 @@ def test_youtube_shorts_publisher_metadata_and_discord_buttons(tmp_path: Path, m
     assert sched_meta["status"]["publishAt"] == pub_at_night
 
     long_meta = yt_pub.build_video_metadata(
-        caption="essa frase propositalmente bem mais longa serve para testar o corte antes da truncagem mobile",
+        caption="essa frase propositalmente bem mais longa serve para testar o corte antes da truncagem mobile no celular",
     )
-    assert len(long_meta["snippet"]["title"]) <= 58
+    assert len(long_meta["snippet"]["title"]) <= 72
+    assert "..." not in long_meta["snippet"]["title"]
     assert "#Shorts" in long_meta["snippet"]["description"]
 
     # Mock resumable upload + thumbnail set via Google API

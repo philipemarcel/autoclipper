@@ -103,8 +103,9 @@ profiles:
         access_token_env: "TIKTOK_ACCESS_TOKEN"
 
       youtube_shorts:
-        # Pausado temporariamente ate reconectar o canal correto com scripts/auth_youtube.py --save
         enabled: true
         privacy_status: "public"
         category_id: "20"
         token_json_env: "YOUTUBE_TOKEN_JSON"
+        # Ritmo próprio anti-spam no YouTube Shorts: 1 Short a cada 6h (~2-3/dia)
+        drip_interval_minutes: 360
