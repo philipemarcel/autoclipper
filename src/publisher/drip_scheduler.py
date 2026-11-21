@@ -21,6 +21,9 @@ DRIP_STATE_FILE = "drip_queue.json"
 
 SUPPORTED_PLATFORMS: Tuple[str, ...] = ("instagram", "facebook", "youtube", "tiktok")
 
+# Defasagem (min) entre as filas das redes: TikTok primeiro, +30 min Instagram/Facebook, +30 min YouTube.
+DEFAULT_NETWORK_OFFSETS: Dict[str, int] = {"tiktok": 0, "instagram": 30, "facebook": 30, "youtube": 60}
+
 PLATFORM_LABELS: Dict[str, str] = {
     "instagram": "Instagram Reels",
     "facebook": "Facebook Reels",
@@ -440,6 +443,56 @@ class DripScheduler:
             "rescheduled_count": rescheduled,
             "next_scheduled_local": next_local,
         }
+
+    def stagger_network_queues(
+        self,
+        profiles_by_id: Dict[str, ProfileConfig],
+        offsets_minutes: Optional[Dict[str, int]] = None,
+        now_utc: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """
+        Escalona as filas por rede social: cada rede passa a começar `offsets_minutes[rede]` minutos
+        depois da rede de referência (offset 0), mantendo o espaçamento `drip_interval` dentro de cada fila.
+        Ex.: {"tiktok": 0, "instagram": 30, "facebook": 30, "youtube": 60}.
+        """
+        now = now_utc or datetime.now(timezone.utc)
+        offsets = {self._canonical_platform(k): max(0, int(v)) for k, v in (offsets_minutes or DEFAULT_NETWORK_OFFSETS).items()}
+        state = self._load_queue_state()
+        state["network_stagger_minutes"] = offsets
+
+        reflowed = 0
+        first_slots: Dict[str, str] = {}
+        for pid, prof in profiles_by_id.items():
+            tz = ZoneInfo(prof.publishing.timezone)
+            quiet_hours = self.get_effective_quiet_hours(prof, state)
+
+            # Referência: a rede com offset 0 que publicou/agendou primeiro
+            ref_plat = min(offsets, key=lambda p: offsets[p])
+            ref_eff = timedelta(minutes=self.get_effective_interval_minutes(prof, state, platform=ref_plat))
+            ref_last = self._get_last_published_iso(state, pid, platform=ref_plat)
+            ref_base = max(now, _parse_iso(ref_last) + ref_eff) if ref_last else now
+
+            for plat, off in offsets.items():
+                queue = [
+                    it for it in state.get("items", [])
+                    if it.get("profile_id") == pid and it.get("status") == "pending" and self._item_platform(it) == plat
+                ]
+                if not queue:
+                    continue
+                queue.sort(key=lambda it: (str(it.get("scheduled_for") or ""), str(it.get("created_at") or "")))
+                delta = timedelta(minutes=self.get_effective_interval_minutes(prof, state, platform=plat))
+                cursor = self._push_past_quiet_hours(ref_base + timedelta(minutes=off), quiet_hours, tz)
+                for idx, it in enumerate(queue):
+                    if idx > 0:
+                        cursor = self._push_past_quiet_hours(cursor + delta, quiet_hours, tz)
+                    new_iso = _to_iso_utc(cursor)
+                    if it.get("scheduled_for") != new_iso:
+                        it["scheduled_for"] = new_iso
+                        reflowed += 1
+                first_slots[plat] = _to_iso_utc(self._push_past_quiet_hours(ref_base + timedelta(minutes=off), quiet_hours, tz))
+
+        self._save_queue_state(state)
+        return {"offsets": offsets, "rescheduled_count": reflowed, "first_slots": first_slots}
 
     def compute_next_slot(
         self,

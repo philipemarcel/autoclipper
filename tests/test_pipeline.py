@@ -2056,6 +2056,36 @@ def test_drip_scheduler_publish_time_dedup_and_nudity_gate(tmp_path: Path, monke
     assert by_id["cut_pending_nude"]["status"] == "blocked_nudity"
 
 
+def test_stagger_network_queues_offsets_between_networks(tmp_path: Path):
+    store = DriveStore(fallback_local_dir=tmp_path / "drive_stagger")
+    prof = _make_profile()
+    prof.publishing.drip_interval_minutes = 60
+    prof.publishing.quiet_hours_brt = None
+    now = datetime(2026, 11, 20, 18, 0, 0, tzinfo=timezone.utc)
+
+    def _it(cid, plat, when):
+        return {"id": f"{cid}::{plat}", "cut_id": cid, "profile_id": prof.id, "platform": plat,
+                "platforms": [plat], "scheduled_for": when, "status": "pending", "created_at": when}
+
+    items = []
+    for plat in ("tiktok", "instagram", "youtube"):
+        items += [_it("a", plat, "2026-11-20T18:00:00Z"), _it("b", plat, "2026-11-20T19:00:00Z")]
+    store.save_state_json("drip_queue.json", {"last_published_by_profile": {}, "items": items})
+
+    scheduler = DripScheduler(store)
+    rep = scheduler.stagger_network_queues(
+        {prof.id: prof}, {"tiktok": 0, "instagram": 30, "youtube": 60}, now_utc=now
+    )
+    assert rep["rescheduled_count"] > 0
+    st = store.load_state_json("drip_queue.json", {})
+    slot = {i["id"]: i["scheduled_for"] for i in st["items"]}
+    assert slot["a::tiktok"] == "2026-11-20T18:00:00Z"
+    assert slot["a::instagram"] == "2026-11-20T18:30:00Z"
+    assert slot["a::youtube"] == "2026-11-20T19:00:00Z"
+    # Cada fila mantém seu próprio intervalo de 60 min
+    assert slot["b::instagram"] == "2026-11-20T19:30:00Z"
+
+
 def test_separate_queues_per_social_network_independence(tmp_path: Path, monkeypatch):
     store = DriveStore(fallback_local_dir=tmp_path / "drive_sep_queues")
     prof = _make_profile()

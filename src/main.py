@@ -885,6 +885,9 @@ def build_cli() -> argparse.ArgumentParser:
     p_drip.add_argument("--force", action="store_true", help="Publica imediatamente o próximo corte elegível da fila.")
     p_drip.add_argument("--platform", type=str, default="", help="Filtrar fila por rede social (instagram, facebook, youtube, tiktok).")
 
+    p_stag = sub.add_parser("stagger-queues", help="Escalona as filas por rede social (ex: tiktok=0,instagram=30,youtube=60).")
+    p_stag.add_argument("--offsets", type=str, default="", help="Defasagens em minutos, ex: tiktok=0,instagram=30,facebook=30,youtube=60")
+
     p_clean = sub.add_parser("cleanup", help="Remove do Google Drive vídeos mais antigos que N dias.")
     p_clean.add_argument("--days", type=int, default=None, help="Dias de retenção (padrão: config de profiles.yaml).")
 
@@ -928,6 +931,12 @@ def main() -> None:
         )
     elif args.command == "drip-publish":
         cmd_drip_publish(force_next=bool(args.force), platform=str(args.platform or ""))
+    elif args.command == "stagger-queues":
+        offs = None
+        if args.offsets.strip():
+            offs = {k.strip(): int(v) for k, v in (p.split("=", 1) for p in args.offsets.split(",") if "=" in p)}
+        profiles = {p.id: p for p in load_profiles(only_enabled=False)}
+        print(DripScheduler(DriveStore()).stagger_network_queues(profiles, offs))
     elif args.command == "cleanup":
         cmd_cleanup(retention_days=args.days)
     elif args.command == "colab-loop":
