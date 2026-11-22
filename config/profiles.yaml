@@ -61,7 +61,7 @@ profiles:
       enabled: true
       page_id_env: FB_PAGE_ID
       access_token_env: FB_ACCESS_TOKEN
-      drip_interval_minutes: 240
+      drip_interval_minutes: 180
     tiktok:
       enabled: true
       mode: direct
