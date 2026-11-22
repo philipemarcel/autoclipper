@@ -2422,90 +2422,196 @@ def test_viral_only_gate_rejects_low_virality_and_disables_blind_kick_fallback(t
     assert store.load_state_json("drip_queue.json", {"items": []})["items"] == []
 
 
-def test_per_streamer_average_score_cutoff_new_streamer_and_weekly_refresh(tmp_path: Path, monkeypatch):
+def test_per_streamer_smart_calibration_new_streamer_and_weekly_refresh(tmp_path: Path, monkeypatch):
     from src.kick.analyzer import KickMomentAnalyzer
     from src.models import TwitchClip
-    from src.streamer_baselines import StreamerBaselineManager
+    from src.streamer_baselines import (
+        StreamerBaselineManager,
+        calibrate_streamer_thresholds,
+        extract_streamer_historical_views,
+    )
     from src.twitch.detector import MomentDetector
+
+    # 1) Calibração imune a 1 live mega-viral (teto de 3 cortes/live na calibração)
+    pairs_with_outlier = (
+        [("live_viral", float(10000 - i * 500)) for i in range(10)]
+        + [("live_1", v) for v in (300.0, 220.0, 150.0, 90.0, 50.0)]
+        + [("live_2", v) for v in (280.0, 200.0, 140.0, 80.0, 40.0)]
+        + [("live_3", v) for v in (260.0, 190.0, 130.0, 70.0, 30.0)]
+    )
+    cal = calibrate_streamer_thresholds(pairs_with_outlier, target_cuts_per_live=3)
+    # Sem teto por live, o 10º clipe seria 5500 views (bloqueando todas as lives normais).
+    # Com teto de 3/live e seletividade 80% (alvo=10 em 4 lives), escolhe 150 (3+3+2+2=10).
+    assert cal["min_views_post_live"] == 150
+    assert cal["min_views_single_clip_live"] == 98  # round(150 * 0.65)
+    assert cal["active_lives"] == 4
+    assert cal["estimated_cuts_per_live"] == 2.5
+
+    # Conversão de score histórico da Kick (`views * 2 + 60`) volta para escala real de views
+    hist_kick = extract_streamer_historical_views(
+        {"cuts": [{"twitch_login": "davyjones", "mode": "kick_clip", "stream_key": "kick_davy_v1", "score": 260.0}]},
+        "davyjones",
+        platform="kick",
+    )
+    assert hist_kick == [("kick_davy_v1", 100.0)]
 
     store = DriveStore(fallback_local_dir=tmp_path / "drive_baselines")
     prof = _make_profile()
     prof.twitch_login = "alanzoka"
     prof.kick_channels = ["https://kick.com/davyjones", "https://kick.com/bistecone"]
     prof.detection.allow_blind_kick_fallback = False
+    prof.detection.max_cuts_per_stream = 3
+    prof.detection.target_cuts_per_live = 3
 
-    processed_state = {
-        "cuts": [
-            {"cut_id": "a1", "twitch_login": "alanzoka", "mode": "post_live", "score": 180.0},
-            {"cut_id": "a2", "twitch_login": "alanzoka", "mode": "post_live", "score": 210.0},
-            {"cut_id": "d1", "twitch_login": "davyjones", "mode": "kick_clip", "score": 400.0},
-            {"cut_id": "d2", "twitch_login": "davyjones", "mode": "kick_clip", "score": 600.0},
-        ]
+    class FakeHelix:
+        def __init__(self, clips_by_login):
+            self.clips_by_login = clips_by_login
+
+        def get_user_by_login(self, login):
+            return {"id": "101", "login": login}
+
+        def get_clips_in_window(self, broadcaster_id, started_at_iso, ended_at_iso, max_pages=2):
+            return list(self.clips_by_login.get("alanzoka", []))
+
+    tw_clips_week1 = [
+        TwitchClip(f"tw1_{i}", f"https://clips.twitch.tv/tw1_{i}", "t", v, "2026-11-20T03:00:00Z", 30.0, "u", "1", "Alanzoka", video_id="v1")
+        for i, v in enumerate([500, 320, 220, 120, 60])
+    ] + [
+        TwitchClip(f"tw2_{i}", f"https://clips.twitch.tv/tw2_{i}", "t", v, "2026-11-21T03:00:00Z", 30.0, "u", "1", "Alanzoka", video_id="v2")
+        for i, v in enumerate([450, 280, 200, 110, 55])
+    ]
+    helix = FakeHelix({"alanzoka": tw_clips_week1})
+
+    kick_api_data = {
+        "davyjones": [
+            {"id": "d1", "views": 300, "vod": {"id": "dv1"}},
+            {"id": "d2", "views": 180, "vod": {"id": "dv1"}},
+            {"id": "d3", "views": 130, "vod": {"id": "dv1"}},
+            {"id": "d4", "views": 70, "vod": {"id": "dv1"}},
+            {"id": "d5", "views": 260, "vod": {"id": "dv2"}},
+            {"id": "d6", "views": 150, "vod": {"id": "dv2"}},
+            {"id": "d7", "views": 110, "vod": {"id": "dv2"}},
+        ],
+        "bistecone": [
+            {"id": "b1", "views": 600, "vod": {"id": "bv1"}},
+            {"id": "b2", "views": 420, "vod": {"id": "bv1"}},
+            {"id": "b3", "views": 310, "vod": {"id": "bv1"}},
+            {"id": "b4", "views": 100, "vod": {"id": "bv1"}},
+            {"id": "b5", "views": 520, "vod": {"id": "bv2"}},
+            {"id": "b6", "views": 350, "vod": {"id": "bv2"}},
+            {"id": "b7", "views": 290, "vod": {"id": "bv2"}},
+        ],
+        "novostreamer": [
+            {"id": "n1", "views": 950, "vod": {"id": "nv1"}},
+            {"id": "n2", "views": 800, "vod": {"id": "nv1"}},
+            {"id": "n3", "views": 650, "vod": {"id": "nv1"}},
+            {"id": "n4", "views": 200, "vod": {"id": "nv1"}},
+            {"id": "n5", "views": 900, "vod": {"id": "nv2"}},
+            {"id": "n6", "views": 750, "vod": {"id": "nv2"}},
+            {"id": "n7", "views": 600, "vod": {"id": "nv2"}},
+        ],
     }
+
     t0 = datetime(2026, 11, 22, 4, 0, 0, tzinfo=timezone.utc)
     mgr = StreamerBaselineManager(store, refresh_days=7)
 
-    # 1) Calcula média inicial para todos os streamers configurados
-    kick_api_data = {
-        "davyjones": [{"views": 500}],
-        "bistecone": [{"views": 200}, {"views": 400}],
-        "novostreamer": [{"views": 700}, {"views": 900}],
-    }
+    # 2) Calcula baseline inicial inteligente para todos os streamers configurados
+    # Em 2 lives ativas com target=3, selectivity=0.80 -> desired_total = round(4.8) = 5.
     baselines = mgr.ensure_profiles_baselines(
         profiles=[prof],
-        processed_state=processed_state,
+        processed_state={"cuts": []},
+        helix=helix,
         kick_clip_fetcher=lambda slug: kick_api_data.get(slug, []),
         now_utc=t0,
     )
-    assert baselines["alanzoka"]["min_views_single_clip_live"] == 195
-    assert baselines["alanzoka"]["min_views_post_live"] == 195
-    assert baselines["davyjones"]["min_views_post_live"] == 500
-    assert baselines["bistecone"]["min_views_post_live"] == 300
+    # Alanzoka: 220 gera 3 (v1) + 2 (v2) = 5 -> post=220, live=round(220*0.65)=143
+    assert baselines["alanzoka"]["min_views_post_live"] == 220
+    assert baselines["alanzoka"]["min_views_single_clip_live"] == 143
+    # Davy: 130 gera 3 (dv1) + 2 (dv2) = 5 -> post=130, live=84 (round(84.5)=84)
+    assert baselines["davyjones"]["min_views_post_live"] == 130
+    assert baselines["davyjones"]["min_views_single_clip_live"] == int(round(130 * 0.65))
+    # Bistecone: 310 gera 3 (bv1) + 2 (bv2) = 5 -> post=310, live=202
+    assert baselines["bistecone"]["min_views_post_live"] == 310
+    assert baselines["bistecone"]["min_views_single_clip_live"] == int(round(310 * 0.65))
 
-    # 2) Novo streamer adicionado no meio da semana -> calculado imediatamente sem esperar 7 dias!
+    # 3) Novo streamer adicionado no meio da semana -> calibrado imediatamente sem esperar 7 dias!
     prof.kick_channels.append("https://kick.com/novostreamer")
     baselines2 = mgr.ensure_profiles_baselines(
         profiles=[prof],
-        processed_state=processed_state,
+        processed_state={"cuts": []},
+        helix=helix,
         kick_clip_fetcher=lambda slug: kick_api_data.get(slug, []),
         now_utc=t0 + timedelta(days=2),
     )
-    assert baselines2["novostreamer"]["min_views_post_live"] == 800
+    # Novostreamer: 650 gera 3 (nv1) + 2 (nv2) = 5 -> post=650, live=422
+    assert baselines2["novostreamer"]["min_views_post_live"] == 650
+    assert baselines2["novostreamer"]["min_views_single_clip_live"] == int(round(650 * 0.65))
     # Streamer antigo mantém timestamp original (ainda não completou 7 dias)
     assert baselines2["alanzoka"]["updated_at"] == "2026-11-22T04:00:00Z"
 
-    # 3) Após 7 dias -> atualiza automaticamente a média semanal de todos os streamers!
-    processed_state["cuts"].append({"cut_id": "a3", "twitch_login": "alanzoka", "mode": "post_live", "score": 300.0})
+    # 4) Após 7 dias -> atualiza automaticamente a calibração semanal de todos os streamers!
+    helix.clips_by_login["alanzoka"] = [
+        TwitchClip(f"tw3_{i}", f"https://clips.twitch.tv/tw3_{i}", "t", v, "2026-11-27T03:00:00Z", 30.0, "u", "1", "Alanzoka", video_id="v3")
+        for i, v in enumerate([800, 500, 360, 150])
+    ] + [
+        TwitchClip(f"tw4_{i}", f"https://clips.twitch.tv/tw4_{i}", "t", v, "2026-11-28T03:00:00Z", 30.0, "u", "1", "Alanzoka", video_id="v4")
+        for i, v in enumerate([700, 400, 310, 120])
+    ]
     baselines3 = mgr.ensure_profiles_baselines(
         profiles=[prof],
-        processed_state=processed_state,
+        processed_state={"cuts": []},
+        helix=helix,
         kick_clip_fetcher=lambda slug: kick_api_data.get(slug, []),
         now_utc=t0 + timedelta(days=7, minutes=1),
     )
-    # Nova média alanzoka = (180 + 210 + 300) / 3 = 230
-    assert baselines3["alanzoka"]["min_views_post_live"] == 230
-    assert baselines3["alanzoka"]["min_views_single_clip_live"] == 230
+    # Nova calibração Alanzoka: 360 gera 3 (v3) + 2 (v4) = 5 -> post=360, live=234
+    assert baselines3["alanzoka"]["min_views_post_live"] == 360
+    assert baselines3["alanzoka"]["min_views_single_clip_live"] == 234
 
-    # 4) MomentDetector e KickMomentAnalyzer usam a nota de corte individual de cada streamer
+    # 5) MomentDetector usa live_hot (234) vs post_live (360) e ignora `rejected_low_virality` no teto de 3/live
     det = MomentDetector(prof, streamer_baselines=baselines3)
-    c_below = TwitchClip("c1", "https://clips.twitch.tv/1", "abaixo", 150, "2026-11-22T03:50:00Z", 30.0, "u1", "1", "Alanzoka", vod_offset=100)
-    c_above = TwitchClip("c2", "https://clips.twitch.tv/2", "acima", 260, "2026-11-22T03:50:00Z", 30.0, "u1", "1", "Alanzoka", vod_offset=500)
-    clusters = det.cluster_clips([c_below, c_above], stream_key="v1", mode="post_live", now_utc=t0)
-    assert [cl.max_views for cl in clusters] == [260]
+    c_mid = TwitchClip("c1", "https://clips.twitch.tv/1", "meio", 260, "2026-11-22T03:50:00Z", 30.0, "u1", "1", "Alanzoka", vod_offset=100)
+    c_high = TwitchClip("c2", "https://clips.twitch.tv/2", "alto", 400, "2026-11-22T03:50:00Z", 30.0, "u1", "1", "Alanzoka", vod_offset=500)
+    # Em post_live (nota 360), só passa o de 400; em live_hot (nota 234), passam ambos!
+    assert [cl.max_views for cl in det.cluster_clips([c_mid, c_high], stream_key="v3", mode="post_live", now_utc=t0)] == [400]
+    assert sorted(cl.max_views for cl in det.cluster_clips([c_mid, c_high], stream_key="v3", mode="live_hot", now_utc=t0)) == [260, 400]
 
+    # Contagem por live ignora cortes rejeitados por baixa viralidade
+    state_with_rejected = {
+        "cuts": [
+            {"profile_id": prof.id, "stream_key": "v3", "status": "queued"},
+            {"profile_id": prof.id, "stream_key": "v3", "status": "rejected_low_virality"},
+            {"profile_id": prof.id, "stream_key": "v3", "status": "rejected_low_virality"},
+            {"profile_id": prof.id, "stream_key": "twitch_top_7d", "video_id": "v3", "status": "queued"},
+        ]
+    }
+    assert det._count_cuts_for_stream(state_with_rejected, "v3") == 2
+
+    # 6) KickMomentAnalyzer aplica nota individual + teto `max_cuts_per_stream=3` (ignorando rejeitados)
     ka = KickMomentAnalyzer(prof, streamer_baselines=baselines3)
     monkeypatch.setattr(ka, "fetch_channel_info", lambda slug: {"slug": slug, "user": {"username": slug}})
     monkeypatch.setattr(
         ka,
         "fetch_channel_clips",
         lambda slug, time_window="day", sort="view": [
-            {"id": "k_low", "views": 600, "duration": 35.0, "title": "abaixo de 800"},
-            {"id": "k_high", "views": 950, "duration": 35.0, "title": "acima de 800"},
+            {"id": "k_low", "views": 500, "duration": 35.0, "title": "abaixo de 650", "vod": {"id": "vod_x"}},
+            {"id": "k_h1", "views": 950, "duration": 35.0, "title": "primeiro momento viral", "vod": {"id": "vod_x"}},
+            {"id": "k_h2", "views": 880, "duration": 35.0, "title": "segundo momento viral", "vod": {"id": "vod_x"}},
+            {"id": "k_other", "views": 820, "duration": 35.0, "title": "momento de outra live", "vod": {"id": "vod_y"}},
         ],
     )
-    k_clusters = ka.discover_channel_moments("novostreamer", max_cuts=2, processed_state={"cuts": []})
-    assert len(k_clusters) == 1
-    assert k_clusters[0].max_views == 950
+    kick_state = {
+        "cuts": [
+            {"profile_id": prof.id, "stream_key": "kick_novostreamer_vod_x", "status": "queued"},
+            {"profile_id": prof.id, "stream_key": "kick_novostreamer_vod_x", "status": "queued"},
+            {"profile_id": prof.id, "stream_key": "kick_novostreamer_vod_x", "status": "rejected_low_virality"},
+        ]
+    }
+    # vod_x já tem 2 cortes válidos (o 3º foi rejeitado) -> só cabe +1 de vod_x (k_h1), e k_h2 é barrado pelo teto de 3/live,
+    # deixando espaço para k_other de vod_y!
+    k_clusters = ka.discover_channel_moments("novostreamer", max_cuts=3, processed_state=kick_state)
+    assert [c.max_views for c in k_clusters] == [950, 820]
+
 
 
 

@@ -97,24 +97,46 @@ class KickMomentAnalyzer:
                 return val
 
         # Se `streamer_baselines` está ativo e este é um streamer recém-adicionado ainda sem entrada:
-        # calcula na hora a média de score/views a partir do histórico + clipes da semana!
+        # calcula na hora a calibração inteligente (~3 melhores momentos por live) a partir dos clipes 7d + histórico!
         if self._has_custom_baselines:
-            from src.streamer_baselines import compute_robust_average, extract_streamer_historical_scores
+            from src.streamer_baselines import (
+                DEFAULT_TARGET_CUTS_PER_LIVE,
+                calibrate_streamer_thresholds,
+                extract_streamer_historical_views,
+            )
 
-            hist = extract_streamer_historical_scores(processed_state, clean_slug)
-            api_views = [float(int(c.get("views") or 0)) for c in merged_clips if int(c.get("views") or 0) > 0]
-            avg_val = compute_robust_average(hist + api_views)
-            if avg_val > 0:
-                cutoff = max(50, int(round(avg_val)))
+            api_pairs = []
+            for c in merged_clips:
+                v = int(c.get("views") or 0)
+                if v > 0:
+                    vod_id = str((c.get("vod") or {}).get("id") or "")
+                    skey = vod_id or str(c.get("created_at") or "")[:10] or "kick"
+                    api_pairs.append((skey, float(v)))
+            hist_pairs = extract_streamer_historical_views(processed_state, clean_slug, platform="kick")
+            sample_pairs = api_pairs if len(api_pairs) >= 6 else (api_pairs + hist_pairs)
+            if sample_pairs:
+                target = max(
+                    1,
+                    int(
+                        getattr(self.cfg, "target_cuts_per_live", DEFAULT_TARGET_CUTS_PER_LIVE)
+                        or DEFAULT_TARGET_CUTS_PER_LIVE
+                    ),
+                )
+                cal = calibrate_streamer_thresholds(sample_pairs, target_cuts_per_live=target)
                 self.streamer_baselines[clean_slug] = {
                     "streamer": clean_slug,
                     "platform": "kick",
-                    "avg_score": avg_val,
-                    "min_views_single_clip_live": cutoff,
-                    "min_views_post_live": cutoff,
-                    "min_score_cutoff": avg_val,
+                    "avg_score": cal["median_views"] or float(cal["min_views_post_live"]),
+                    "median_views": cal["median_views"],
+                    "min_views_single_clip_live": cal["min_views_single_clip_live"],
+                    "min_views_post_live": cal["min_views_post_live"],
+                    "min_score_cutoff": 0.0,
+                    "target_cuts_per_live": target,
+                    "active_lives_7d": cal["active_lives"],
+                    "estimated_cuts_per_live": cal["estimated_cuts_per_live"],
+                    "calibration_method": cal["method"],
                 }
-                return cutoff
+                return cal["min_views_single_clip_live"] if is_live else cal["min_views_post_live"]
 
         return self.cfg.min_views_single_clip_live if is_live else self.cfg.min_views_post_live
 
@@ -219,6 +241,8 @@ class KickMomentAnalyzer:
         chosen_clips = eligible_clips or (fallback_offline_clips if (not is_live and allow_blind_fallback) else [])
         accepted_records: List[Dict[str, Any]] = []
         base_cuts = list((processed_state or {}).get("cuts", []))
+        max_per_stream = max(1, int(getattr(self.cfg, "max_cuts_per_stream", 3) or 3))
+        per_stream_accepted: Dict[str, int] = {}
         for rank_score, clip in chosen_clips:
             cid = str(clip.get("id") or "").strip()
             dur = float(clip.get("duration") or 0.0)
@@ -229,14 +253,47 @@ class KickMomentAnalyzer:
                 stream_url = page_url
 
             vod_obj = clip.get("vod") or {}
-            vod_uuid = str(vod_obj.get("id") or f"kick_{slug}")
+            raw_vod_id = str(vod_obj.get("id") or "").strip()
+            vod_uuid = raw_vod_id or f"kick_{slug}"
+            stream_key = f"kick_{slug}_{vod_uuid}"
+            clip_day = str(clip.get("created_at") or "")[:10]
+            cap_bucket = stream_key if raw_vod_id else f"{stream_key}:{clip_day or 'today'}"
+
+            if raw_vod_id:
+                existing_for_stream = sum(
+                    1
+                    for r in base_cuts
+                    if r.get("stream_key") == stream_key
+                    and r.get("status") != "rejected_low_virality"
+                )
+            else:
+                existing_for_stream = sum(
+                    1
+                    for r in base_cuts
+                    if r.get("stream_key") == stream_key
+                    and r.get("status") != "rejected_low_virality"
+                    and (
+                        not clip_day
+                        or str(r.get("clip_created_at") or r.get("created_at") or "")[:10] == clip_day
+                    )
+                )
+
+            if existing_for_stream + per_stream_accepted.get(cap_bucket, 0) >= max_per_stream:
+                logger.info(
+                    "Clipe Kick %s ignorado: live %s já atingiu o teto de %d cortes/live.",
+                    cid,
+                    cap_bucket,
+                    max_per_stream,
+                )
+                continue
+
             title = str(clip.get("title") or f"Clipe de {display_name}")
             cand_rec = {
                 "cut_id": self._make_cluster_id(slug, f"clip_{cid}"),
                 "profile_id": self.profile.id,
                 "twitch_login": slug,
                 "creator_name": display_name,
-                "stream_key": f"kick_{slug}_{vod_uuid}",
+                "stream_key": stream_key,
                 "mode": "kick_clip",
                 "clip_ids": [cid],
                 "clip_urls": [page_url],
@@ -249,6 +306,7 @@ class KickMomentAnalyzer:
                 continue
 
             accepted_records.append(cand_rec)
+            per_stream_accepted[cap_bucket] = per_stream_accepted.get(cap_bucket, 0) + 1
             clusters.append(
                 self._build_clip_cluster(
                     slug=slug,
@@ -259,7 +317,7 @@ class KickMomentAnalyzer:
                     duration=dur,
                     stream_url=stream_url,
                     page_url=page_url,
-                    stream_key=f"kick_{slug}_{vod_uuid}",
+                    stream_key=stream_key,
                     score=rank_score,
                     created_at=str(clip.get("created_at") or ""),
                 )

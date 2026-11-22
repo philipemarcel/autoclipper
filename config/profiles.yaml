@@ -14,10 +14,11 @@ profiles:
   detection:
     cluster_window_seconds: 75
     min_clips_live_cluster: 4
-    min_views_single_clip_live: 224
-    min_views_post_live: 224
+    min_views_single_clip_live: 141
+    min_views_post_live: 217
     recap_hours: 36
-    max_cuts_per_stream: 5
+    max_cuts_per_stream: 3
+    target_cuts_per_live: 3
     max_cuts_per_run: 2
     dedup_overlap_seconds: 50
     vod_padding_before_seconds: 45

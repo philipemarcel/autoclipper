@@ -49,7 +49,10 @@ class MomentDetector:
         if entry and isinstance(entry, dict):
             live_min = int(entry.get("min_views_single_clip_live") or self.cfg.min_views_single_clip_live)
             post_min = int(entry.get("min_views_post_live") or self.cfg.min_views_post_live)
-            score_cut = float(entry.get("min_score_cutoff") or entry.get("avg_score") or 0.0)
+            if "min_score_cutoff" in entry:
+                score_cut = float(entry.get("min_score_cutoff") or 0.0)
+            else:
+                score_cut = float(entry.get("avg_score") or 0.0)
             return (live_min if mode == "live_hot" else post_min), score_cut
         return (
             self.cfg.min_views_single_clip_live if mode == "live_hot" else self.cfg.min_views_post_live
@@ -196,17 +199,37 @@ class MomentDetector:
                     stream_title="Top Clipes da Página Twitch",
                 )
                 already_grabbed_ids = {c.id for cl in candidates for c in cl.clips}
-                page_clusters = [
-                    pc for pc in page_clusters if not ({c.id for c in pc.clips} & already_grabbed_ids)
-                ]
+                per_vod_counts: Dict[str, int] = {}
+                for cl in candidates:
+                    v_key = cl.video_id or cl.stream_or_vod_key
+                    if v_key and v_key != "twitch_top_7d":
+                        per_vod_counts[v_key] = per_vod_counts.get(v_key, 0) + 1
+
+                eligible_page_clusters: List[MomentCluster] = []
+                for pc in page_clusters:
+                    if {c.id for c in pc.clips} & already_grabbed_ids:
+                        continue
+                    if pc.video_id:
+                        existing_for_vod = self._count_cuts_for_stream(processed_state, pc.video_id)
+                        if existing_for_vod + per_vod_counts.get(pc.video_id, 0) >= self.cfg.max_cuts_per_stream:
+                            continue
+                    eligible_page_clusters.append(pc)
+
                 page_filtered = self._filter_and_deduplicate(
-                    clusters=page_clusters,
+                    clusters=eligible_page_clusters,
                     processed_state=processed_state,
                     stream_key="twitch_top_7d",
                     alt_stream_key="",
-                    remaining_slots=self.cfg.max_cuts_per_run,
+                    remaining_slots=max(self.cfg.max_cuts_per_run, self.cfg.max_cuts_per_stream * 2),
                 )
-                candidates.extend(page_filtered)
+                for pc in page_filtered:
+                    if pc.video_id:
+                        existing_for_vod = self._count_cuts_for_stream(processed_state, pc.video_id)
+                        planned_for_vod = per_vod_counts.get(pc.video_id, 0)
+                        if existing_for_vod + planned_for_vod >= self.cfg.max_cuts_per_stream:
+                            continue
+                        per_vod_counts[pc.video_id] = planned_for_vod + 1
+                    candidates.append(pc)
         except Exception as exc:
             logger.warning("Aviso ao consultar página de Top Clipes 7d da Twitch: %s", exc)
 
@@ -436,5 +459,7 @@ class MomentDetector:
         return sum(
             1
             for r in processed_state.get("cuts", [])
-            if r.get("profile_id") == self.profile.id and r.get("stream_key") in keys
+            if r.get("profile_id") == self.profile.id
+            and r.get("status") != "rejected_low_virality"
+            and (r.get("stream_key") in keys or (r.get("video_id") and r.get("video_id") in keys))
         )
