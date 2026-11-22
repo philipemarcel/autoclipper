@@ -71,9 +71,52 @@ class KickMomentAnalyzer:
       3. Modo Repescagem/VOD (`kick_vod`): analisa VODs encerrados (`/videos`) com `source` `.m3u8` para extrair momentos.
     """
 
-    def __init__(self, profile: ProfileConfig) -> None:
+    def __init__(
+        self,
+        profile: ProfileConfig,
+        streamer_baselines: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
         self.profile = profile
         self.cfg = profile.detection
+        self.streamer_baselines = streamer_baselines if streamer_baselines is not None else {}
+        self._has_custom_baselines = streamer_baselines is not None
+
+    def _resolve_streamer_min_views(
+        self,
+        slug: str,
+        is_live: bool,
+        merged_clips: List[Dict[str, Any]],
+        processed_state: Optional[Dict[str, Any]],
+    ) -> int:
+        clean_slug = str(slug or "").strip().lower().lstrip("@")
+        entry = self.streamer_baselines.get(clean_slug)
+        if entry and isinstance(entry, dict):
+            key = "min_views_single_clip_live" if is_live else "min_views_post_live"
+            val = int(entry.get(key) or entry.get("avg_score") or 0)
+            if val > 0:
+                return val
+
+        # Se `streamer_baselines` está ativo e este é um streamer recém-adicionado ainda sem entrada:
+        # calcula na hora a média de score/views a partir do histórico + clipes da semana!
+        if self._has_custom_baselines:
+            from src.streamer_baselines import compute_robust_average, extract_streamer_historical_scores
+
+            hist = extract_streamer_historical_scores(processed_state, clean_slug)
+            api_views = [float(int(c.get("views") or 0)) for c in merged_clips if int(c.get("views") or 0) > 0]
+            avg_val = compute_robust_average(hist + api_views)
+            if avg_val > 0:
+                cutoff = max(50, int(round(avg_val)))
+                self.streamer_baselines[clean_slug] = {
+                    "streamer": clean_slug,
+                    "platform": "kick",
+                    "avg_score": avg_val,
+                    "min_views_single_clip_live": cutoff,
+                    "min_views_post_live": cutoff,
+                    "min_score_cutoff": avg_val,
+                }
+                return cutoff
+
+        return self.cfg.min_views_single_clip_live if is_live else self.cfg.min_views_post_live
 
     def _get_json(self, path: str) -> Any:
         url = f"{KICK_API_V2}/{path.lstrip('/')}"
@@ -126,7 +169,6 @@ class KickMomentAnalyzer:
         clusters: List[MomentCluster] = []
 
         # 1. Prioriza clipes reais feitos pela comunidade na Kick (`day` + repescagem `week`), ranqueados por qualidade real
-        min_views = self.cfg.min_views_single_clip_live if is_live else self.cfg.min_views_post_live
         day_clips = self.fetch_channel_clips(slug, time_window="day", sort="view")
         week_clips = self.fetch_channel_clips(slug, time_window="week", sort="view")
         day_ids = {str(c.get("id") or "").strip() for c in day_clips if c.get("id")}
@@ -138,6 +180,8 @@ class KickMomentAnalyzer:
             if cid and cid not in seen_raw:
                 seen_raw.add(cid)
                 merged_clips.append(clip)
+
+        min_views = self._resolve_streamer_min_views(slug, is_live, merged_clips, processed_state)
 
         recent_cut_times = self._collect_recent_clip_times(slug, processed_state)
         eligible_clips: List[tuple[float, Dict[str, Any]]] = []

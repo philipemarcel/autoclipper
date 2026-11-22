@@ -14,8 +14,8 @@ profiles:
   detection:
     cluster_window_seconds: 75
     min_clips_live_cluster: 4
-    min_views_single_clip_live: 250
-    min_views_post_live: 350
+    min_views_single_clip_live: 224
+    min_views_post_live: 224
     recap_hours: 36
     max_cuts_per_stream: 5
     max_cuts_per_run: 2

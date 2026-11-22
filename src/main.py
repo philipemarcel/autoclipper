@@ -27,6 +27,7 @@ from src.kick.downloader import KickDownloader
 from src.models import CutRecord, MomentCluster, ProfileConfig
 from src.publisher.drip_scheduler import DripScheduler
 from src.storage.gdrive import DriveStore
+from src.streamer_baselines import StreamerBaselineManager
 from src.twitch.client import TwitchHelixClient
 from src.twitch.detector import MomentDetector
 from src.twitch.downloader import TwitchDownloader
@@ -395,13 +396,23 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
     processed_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
     work_root = PROJECT_ROOT / "work_tmp" / "watch"
 
+    # Calcula/atualiza semanalmente a média de score de cada streamer (atuais + novos adicionados)
+    baseline_mgr = StreamerBaselineManager(store)
+    kick_fetcher = KickMomentAnalyzer(active_profiles[0])
+    streamer_baselines = baseline_mgr.ensure_profiles_baselines(
+        profiles=active_profiles,
+        processed_state=processed_state,
+        helix=helix,
+        kick_clip_fetcher=lambda slug: kick_fetcher.fetch_channel_clips(slug, time_window="week", sort="view"),
+    )
+
     total_created = 0
     for prof in active_profiles:
         if max_cuts_override is not None:
             prof.detection.max_cuts_per_run = max_cuts_override
 
         if helix is not None and prof.twitch_login not in {"seu_criador_aqui", ""}:
-            detector = MomentDetector(prof)
+            detector = MomentDetector(prof, streamer_baselines=streamer_baselines)
             candidates = detector.discover_candidates(helix, processed_state)
             logger.info(
                 "Perfil `%s` (@%s): %d momento(s) candidato(s) encontrado(s).",
@@ -460,7 +471,7 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
 
         # Monitoramento automático 24/7 dos canais da Kick configurados no perfil (somente clipes virais quando allow_blind_kick_fallback=False)
         if prof.kick_channels:
-            kick_analyzer = KickMomentAnalyzer(prof)
+            kick_analyzer = KickMomentAnalyzer(prof, streamer_baselines=streamer_baselines)
             kick_cap = max(1, int(prof.detection.max_cuts_per_run))
             kick_budget = min(len(prof.kick_channels), kick_cap) if max_cuts_override is None else max(1, min(3, max_cuts_override))
             kick_created = 0
@@ -924,6 +935,9 @@ def build_cli() -> argparse.ArgumentParser:
     p_stag = sub.add_parser("stagger-queues", help="Escalona as filas por rede social (ex: tiktok=0,instagram=30,youtube=60).")
     p_stag.add_argument("--offsets", type=str, default="", help="Defasagens em minutos, ex: tiktok=0,instagram=30,facebook=30,youtube=60")
 
+    p_base = sub.add_parser("refresh-baselines", help="Calcula e atualiza a média semanal de score/views por streamer.")
+    p_base.add_argument("--force", action="store_true", help="Força recálculo imediato mesmo antes de completar 7 dias.")
+
     p_clean = sub.add_parser("cleanup", help="Remove do Google Drive vídeos mais antigos que N dias.")
     p_clean.add_argument("--days", type=int, default=None, help="Dias de retenção (padrão: config de profiles.yaml).")
 
@@ -973,6 +987,25 @@ def main() -> None:
             offs = {k.strip(): int(v) for k, v in (p.split("=", 1) for p in args.offsets.split(",") if "=" in p)}
         profiles = {p.id: p for p in load_profiles(only_enabled=False)}
         print(DripScheduler(DriveStore()).stagger_network_queues(profiles, offs))
+    elif args.command == "refresh-baselines":
+        store = DriveStore()
+        profs = load_profiles(only_enabled=False)
+        proc_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
+        helix_cli = (
+            TwitchHelixClient()
+            if (os.getenv("TWITCH_CLIENT_ID", "").strip() and os.getenv("TWITCH_CLIENT_SECRET", "").strip())
+            else None
+        )
+        ka = KickMomentAnalyzer(profs[0]) if profs else None
+        mgr = StreamerBaselineManager(store)
+        res = mgr.ensure_profiles_baselines(
+            profiles=profs,
+            processed_state=proc_state,
+            helix=helix_cli,
+            kick_clip_fetcher=(lambda slug: ka.fetch_channel_clips(slug, time_window="week", sort="view")) if ka else None,
+            force_refresh=bool(args.force),
+        )
+        print(json.dumps(res, ensure_ascii=False, indent=2))
     elif args.command == "cleanup":
         cmd_cleanup(retention_days=args.days)
     elif args.command == "colab-loop":

@@ -34,9 +34,26 @@ class MomentDetector:
          sem duplicar trechos já cortados durante a live.
     """
 
-    def __init__(self, profile: ProfileConfig) -> None:
+    def __init__(
+        self,
+        profile: ProfileConfig,
+        streamer_baselines: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
         self.profile = profile
         self.cfg = profile.detection
+        self.streamer_baselines = streamer_baselines or {}
+
+    def _effective_min_views(self, mode: str) -> Tuple[int, float]:
+        slug = str(self.profile.twitch_login or "").strip().lower().lstrip("@")
+        entry = self.streamer_baselines.get(slug) if slug else None
+        if entry and isinstance(entry, dict):
+            live_min = int(entry.get("min_views_single_clip_live") or self.cfg.min_views_single_clip_live)
+            post_min = int(entry.get("min_views_post_live") or self.cfg.min_views_post_live)
+            score_cut = float(entry.get("min_score_cutoff") or entry.get("avg_score") or 0.0)
+            return (live_min if mode == "live_hot" else post_min), score_cut
+        return (
+            self.cfg.min_views_single_clip_live if mode == "live_hot" else self.cfg.min_views_post_live
+        ), 0.0
 
     def discover_candidates(
         self,
@@ -260,17 +277,13 @@ class MomentDetector:
             max_views = max(c.view_count for c in grp)
             best = max(grp, key=lambda c: (c.view_count, c.duration))
 
-            # Critério de disparo conforme o modo
-            if mode == "live_hot":
-                qualifies = (
-                    unique_clippers >= self.cfg.min_clips_live_cluster
-                    or max_views >= self.cfg.min_views_single_clip_live
-                )
-            else:
-                qualifies = (
-                    max_views >= self.cfg.min_views_post_live
-                    or unique_clippers >= self.cfg.min_clips_live_cluster
-                )
+            eff_min_views, min_score_cutoff = self._effective_min_views(mode)
+
+            # Critério de disparo conforme o modo (usando a nota de corte dinâmica do streamer)
+            qualifies = (
+                unique_clippers >= self.cfg.min_clips_live_cluster
+                or max_views >= eff_min_views
+            )
 
             if not qualifies:
                 continue
@@ -289,6 +302,8 @@ class MomentDetector:
                 + min(60.0, velocity * 2.0)
             )
             score = round(raw_score, 1)
+            if min_score_cutoff > 0 and score < min_score_cutoff and max_views < eff_min_views:
+                continue
 
             offsets = [int(c.vod_offset) for c in grp if c.vod_offset is not None]
             vod_start = min(offsets) if offsets else None

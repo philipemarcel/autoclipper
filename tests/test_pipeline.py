@@ -2422,5 +2422,92 @@ def test_viral_only_gate_rejects_low_virality_and_disables_blind_kick_fallback(t
     assert store.load_state_json("drip_queue.json", {"items": []})["items"] == []
 
 
+def test_per_streamer_average_score_cutoff_new_streamer_and_weekly_refresh(tmp_path: Path, monkeypatch):
+    from src.kick.analyzer import KickMomentAnalyzer
+    from src.models import TwitchClip
+    from src.streamer_baselines import StreamerBaselineManager
+    from src.twitch.detector import MomentDetector
+
+    store = DriveStore(fallback_local_dir=tmp_path / "drive_baselines")
+    prof = _make_profile()
+    prof.twitch_login = "alanzoka"
+    prof.kick_channels = ["https://kick.com/davyjones", "https://kick.com/bistecone"]
+    prof.detection.allow_blind_kick_fallback = False
+
+    processed_state = {
+        "cuts": [
+            {"cut_id": "a1", "twitch_login": "alanzoka", "mode": "post_live", "score": 180.0},
+            {"cut_id": "a2", "twitch_login": "alanzoka", "mode": "post_live", "score": 210.0},
+            {"cut_id": "d1", "twitch_login": "davyjones", "mode": "kick_clip", "score": 400.0},
+            {"cut_id": "d2", "twitch_login": "davyjones", "mode": "kick_clip", "score": 600.0},
+        ]
+    }
+    t0 = datetime(2026, 11, 22, 4, 0, 0, tzinfo=timezone.utc)
+    mgr = StreamerBaselineManager(store, refresh_days=7)
+
+    # 1) Calcula média inicial para todos os streamers configurados
+    kick_api_data = {
+        "davyjones": [{"views": 500}],
+        "bistecone": [{"views": 200}, {"views": 400}],
+        "novostreamer": [{"views": 700}, {"views": 900}],
+    }
+    baselines = mgr.ensure_profiles_baselines(
+        profiles=[prof],
+        processed_state=processed_state,
+        kick_clip_fetcher=lambda slug: kick_api_data.get(slug, []),
+        now_utc=t0,
+    )
+    assert baselines["alanzoka"]["min_views_single_clip_live"] == 195
+    assert baselines["alanzoka"]["min_views_post_live"] == 195
+    assert baselines["davyjones"]["min_views_post_live"] == 500
+    assert baselines["bistecone"]["min_views_post_live"] == 300
+
+    # 2) Novo streamer adicionado no meio da semana -> calculado imediatamente sem esperar 7 dias!
+    prof.kick_channels.append("https://kick.com/novostreamer")
+    baselines2 = mgr.ensure_profiles_baselines(
+        profiles=[prof],
+        processed_state=processed_state,
+        kick_clip_fetcher=lambda slug: kick_api_data.get(slug, []),
+        now_utc=t0 + timedelta(days=2),
+    )
+    assert baselines2["novostreamer"]["min_views_post_live"] == 800
+    # Streamer antigo mantém timestamp original (ainda não completou 7 dias)
+    assert baselines2["alanzoka"]["updated_at"] == "2026-11-22T04:00:00Z"
+
+    # 3) Após 7 dias -> atualiza automaticamente a média semanal de todos os streamers!
+    processed_state["cuts"].append({"cut_id": "a3", "twitch_login": "alanzoka", "mode": "post_live", "score": 300.0})
+    baselines3 = mgr.ensure_profiles_baselines(
+        profiles=[prof],
+        processed_state=processed_state,
+        kick_clip_fetcher=lambda slug: kick_api_data.get(slug, []),
+        now_utc=t0 + timedelta(days=7, minutes=1),
+    )
+    # Nova média alanzoka = (180 + 210 + 300) / 3 = 230
+    assert baselines3["alanzoka"]["min_views_post_live"] == 230
+    assert baselines3["alanzoka"]["min_views_single_clip_live"] == 230
+
+    # 4) MomentDetector e KickMomentAnalyzer usam a nota de corte individual de cada streamer
+    det = MomentDetector(prof, streamer_baselines=baselines3)
+    c_below = TwitchClip("c1", "https://clips.twitch.tv/1", "abaixo", 150, "2026-11-22T03:50:00Z", 30.0, "u1", "1", "Alanzoka", vod_offset=100)
+    c_above = TwitchClip("c2", "https://clips.twitch.tv/2", "acima", 260, "2026-11-22T03:50:00Z", 30.0, "u1", "1", "Alanzoka", vod_offset=500)
+    clusters = det.cluster_clips([c_below, c_above], stream_key="v1", mode="post_live", now_utc=t0)
+    assert [cl.max_views for cl in clusters] == [260]
+
+    ka = KickMomentAnalyzer(prof, streamer_baselines=baselines3)
+    monkeypatch.setattr(ka, "fetch_channel_info", lambda slug: {"slug": slug, "user": {"username": slug}})
+    monkeypatch.setattr(
+        ka,
+        "fetch_channel_clips",
+        lambda slug, time_window="day", sort="view": [
+            {"id": "k_low", "views": 600, "duration": 35.0, "title": "abaixo de 800"},
+            {"id": "k_high", "views": 950, "duration": 35.0, "title": "acima de 800"},
+        ],
+    )
+    k_clusters = ka.discover_channel_moments("novostreamer", max_cuts=2, processed_state={"cuts": []})
+    assert len(k_clusters) == 1
+    assert k_clusters[0].max_views == 950
+
+
+
 
 
