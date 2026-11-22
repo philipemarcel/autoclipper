@@ -168,9 +168,11 @@ class KickMomentAnalyzer:
             elif not is_live and views >= 40:
                 fallback_offline_clips.append((rank_score, clip))
 
+        allow_blind_fallback = bool(getattr(self.cfg, "allow_blind_kick_fallback", True))
+
         eligible_clips.sort(key=lambda pair: pair[0], reverse=True)
         fallback_offline_clips.sort(key=lambda pair: pair[0], reverse=True)
-        chosen_clips = eligible_clips or (fallback_offline_clips if not is_live else [])
+        chosen_clips = eligible_clips or (fallback_offline_clips if (not is_live and allow_blind_fallback) else [])
         accepted_records: List[Dict[str, Any]] = []
         base_cuts = list((processed_state or {}).get("cuts", []))
         for rank_score, clip in chosen_clips:
@@ -223,6 +225,10 @@ class KickMomentAnalyzer:
 
         if clusters:
             return clusters
+
+        if not allow_blind_fallback:
+            logger.info("Canal Kick `%s` sem clipes acima de %d views; pulando captura cega de live/VOD.", slug, min_views)
+            return []
 
         # 2. Se está AO VIVO e ainda não teve clipe forte, captura janela ao vivo do HLS
         if is_live and playback_url:

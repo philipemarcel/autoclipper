@@ -69,6 +69,8 @@ _DEDUP_ITEM_KEYS = (
     "transcript_snippet",
     "director",
     "mode",
+    "score",
+    "virality_score",
 )
 
 

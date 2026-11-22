@@ -16,6 +16,8 @@ class DetectionConfig:
     vod_padding_before_seconds: int = 45
     vod_padding_after_seconds: int = 45
     recap_hours: int = 36
+    min_virality_score: int = 75
+    allow_blind_kick_fallback: bool = True
 
 
 @dataclass

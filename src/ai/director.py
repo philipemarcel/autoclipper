@@ -280,6 +280,13 @@ REGRAS OBRIGATÓRIAS DE EDIÇÃO (OTIMIZADAS PARA REELS/SHORTS/TIKTOK — RETEN�
      * NÃO use tags genéricas vazias (`#fyp`, `#fy`, `#foryou`, `#viral`), pois não ajudam na indexação de nicho.
 5. CORREÇÃO DE GRAFIA DO WHISPER (`word_corrections`):
    - Se notar na transcrição alguma palavra claramente ouvida errado pelo Whisper (ex: nome de jogo, gíria ou palavra trocada), inclua no dicionário `"word_corrections": {{"palavra_errada": "palavra_certa"}}` (caso contrário, `{{}}`).
+6. NOTA RIGOROSA DE VIRALIDADE (`virality_score` de 0 a 100 — FILTRO SELETIVO DE QUALIDADE):
+   - Seja MUITO CRITERIOSO e HONESTO. NÃO dê 75-80 por padrão! Só dê nota `>= 80` para cortes realmente memoráveis que merecem entrar na fila principal:
+     * `0–49`: Trecho comum/morno, conversa parada, leitura de chat/doações, menu/loading, ajuste técnico, frase solta sem contexto ou sem desfecho (DESCARTE).
+     * `50–69`: Momento mediano/interno que só faz sentido para quem acompanha a live inteira, sem gancho forte nos 3 primeiros segundos.
+     * `70–79`: Momento legal, mas sem explosão real de humor, surpresa, susto, polêmica, jogada absurda ou frase icônica.
+     * `80–89`: **Corte viral forte** — gancho imediato nos primeiros 3s, reação genuína marcante (gargalhada, susto, rage, plot twist, falha hilária ou pérola) e começo-meio-fim claro que as pessoas mandariam para amigos.
+     * `90–100`: **Ouro viral** — clipe explosivo de altíssimo potencial de retenção, compartilhamento e replay.
 
 Responda ESTRITAMENTE em JSON válido com as chaves:
 {{
@@ -526,6 +533,15 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
         )
 
         creator_handle, creator_name = self._resolve_cluster_creator(cluster)
+        # Fallback heurístico conservador: não infla nota de cortes cegos (kick_live/kick_vod) sem sinal de viralidade
+        if cluster.mode in ("kick_live", "kick_vod"):
+            fallback_virality = 60
+        elif cluster.total_views >= 800 or cluster.unique_clippers >= 5:
+            fallback_virality = 86
+        elif cluster.total_views >= 350 or cluster.unique_clippers >= 4:
+            fallback_virality = 81
+        else:
+            fallback_virality = int(min(74, max(55, cluster.score * 0.4)))
         return self.enforce_constraints(
             {
                 "main_start": start,
@@ -536,8 +552,8 @@ Responda ESTRITAMENTE em JSON válido com as chaves:
                 "teaser_headline": (spoken_quote or title_clean).upper()[:42] if cold_open else "",
                 "caption_text": fallback_caption,
                 "hashtags": tags[: self.profile.copy.max_hashtags],
-                "virality_score": int(min(95, max(60, cluster.score))),
-                "reasoning": "Fallback centrado no pico de clipes da comunidade.",
+                "virality_score": fallback_virality,
+                "reasoning": "Fallback conservador baseado no engajamento real do clipe.",
             },
             words=words,
             raw_duration_sec=raw_duration_sec,

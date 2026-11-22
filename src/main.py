@@ -67,6 +67,25 @@ def _merge_processed_state_for_dedup(store: DriveStore, processed_state: Dict[st
     return {"cuts": merged}
 
 
+def _save_cut_entry_atomic(store: DriveStore, processed_state: Dict[str, Any], cut_entry: Dict[str, Any]) -> None:
+    """Faz merge atômico de um corte/tombstone em processed_moments.json sem sobrescrever runs paralelos."""
+    latest_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
+    merged_by_id: Dict[str, Dict[str, Any]] = {}
+    for c in latest_state.get("cuts", []):
+        cid = str(c.get("cut_id") or "")
+        if cid:
+            merged_by_id[cid] = c
+    for c in processed_state.get("cuts", []):
+        cid = str(c.get("cut_id") or "")
+        if cid and cid not in merged_by_id:
+            merged_by_id[cid] = c
+    entry_id = str(cut_entry.get("cut_id") or "")
+    if entry_id:
+        merged_by_id[entry_id] = cut_entry
+    processed_state["cuts"] = list(merged_by_id.values())
+    store.save_state_json(PROCESSED_STATE_FILE, processed_state)
+
+
 def process_single_cluster(
     profile: ProfileConfig,
     cluster: MomentCluster,
@@ -74,6 +93,7 @@ def process_single_cluster(
     subtitle_theme: Dict[str, Any],
     processed_state: Dict[str, Any],
     work_root: Path,
+    is_manual: bool = False,
 ) -> Optional[CutRecord]:
     cut_work_dir = work_root / cluster.cluster_id
     cut_work_dir.mkdir(parents=True, exist_ok=True)
@@ -129,6 +149,27 @@ def process_single_cluster(
             raw_duration_sec=raw_media.duration_sec,
             peak_hint_sec=raw_media.peak_Hint_sec_in_file,
         )
+
+        # 3.2. Barreira seletiva de viralidade (apenas cortes realmente virais/importantes entram na fila)
+        min_virality = int(getattr(profile.detection, "min_virality_score", 0) or 0)
+        if not is_manual and min_virality > 0 and int(decision.virality_score) < min_virality:
+            logger.info(
+                "Corte %s descartado por baixa viralidade (virality_score=%d < %d): %s",
+                cluster.cluster_id,
+                decision.virality_score,
+                min_virality,
+                decision.reasoning[:180],
+            )
+            tombstone = {
+                **pre_candidate,
+                "status": "rejected_low_virality",
+                "score": cluster.score,
+                "virality_score": int(decision.virality_score),
+                "reasoning": decision.reasoning[:300],
+                "created_at": _utc_now_iso(),
+            }
+            _save_cut_entry_atomic(store, processed_state, tombstone)
+            return None
 
         # 3.5. Barreira anti-duplicação semântica + temporal antes de renderizar/subir (contexto falado, descrição e janela extraída)
         cut_transcript = " ".join(
@@ -242,6 +283,7 @@ def process_single_cluster(
             "virality_score": decision.virality_score,
             "reasoning": decision.reasoning,
         }
+        meta_dict["virality_score"] = int(decision.virality_score)
         meta_dict["drive_parts"] = drive_parts
         meta_dict["clip_ids"] = [c.id for c in cluster.clips]
         if cluster.best_clip.created_at:
@@ -300,19 +342,7 @@ def process_single_cluster(
         meta_dict["discord_message_id"] = msg_id
 
         # 9. Faz merge atômico com o estado mais recente do Drive para evitar que runs paralelos sobrescrevam cortes
-        latest_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
-        merged_by_id: Dict[str, Dict[str, Any]] = {}
-        for c in latest_state.get("cuts", []):
-            cid = str(c.get("cut_id") or "")
-            if cid:
-                merged_by_id[cid] = c
-        for c in processed_state.get("cuts", []):
-            cid = str(c.get("cut_id") or "")
-            if cid and cid not in merged_by_id:
-                merged_by_id[cid] = c
-        merged_by_id[record.cut_id] = meta_dict
-        processed_state["cuts"] = list(merged_by_id.values())
-        store.save_state_json(PROCESSED_STATE_FILE, processed_state)
+        _save_cut_entry_atomic(store, processed_state, meta_dict)
         logger.info("Corte %s concluído e salvo no estado global!", record.cut_id)
         return record
     finally:
@@ -389,10 +419,11 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
                     logger.exception("Erro ao processar cluster %s: %s", cluster.cluster_id, exc)
 
         # Monitoramento automático 24/7 dos canais do YouTube configurados no perfil (vídeos novos + lives + repescagem)
-        # Garante cota justa de 1 corte novo por canal antes de encerrar, evitando que o 1º canal consuma toda a cota.
+        # Garante cota justa de 1 corte novo por canal antes de encerrar, respeitando o teto `max_cuts_per_run`.
         if prof.youtube_channels:
             yt_analyzer = YouTubeMomentAnalyzer(prof)
-            yt_budget = max(len(prof.youtube_channels), 2) if max_cuts_override is None else max(1, min(3, max_cuts_override))
+            yt_cap = max(1, int(prof.detection.max_cuts_per_run))
+            yt_budget = min(len(prof.youtube_channels), yt_cap) if max_cuts_override is None else max(1, min(3, max_cuts_override))
             yt_created = 0
             for ch_url in prof.youtube_channels:
                 if yt_created >= yt_budget:
@@ -427,10 +458,11 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
                     except Exception as exc:
                         logger.warning("Aviso ao monitorar vídeo YouTube %s: %s", v_url, exc)
 
-        # Monitoramento automático 24/7 dos canais da Kick configurados no perfil (clipes + lives + VODs)
+        # Monitoramento automático 24/7 dos canais da Kick configurados no perfil (somente clipes virais quando allow_blind_kick_fallback=False)
         if prof.kick_channels:
             kick_analyzer = KickMomentAnalyzer(prof)
-            kick_budget = max(len(prof.kick_channels), 2) if max_cuts_override is None else max(1, min(3, max_cuts_override))
+            kick_cap = max(1, int(prof.detection.max_cuts_per_run))
+            kick_budget = min(len(prof.kick_channels), kick_cap) if max_cuts_override is None else max(1, min(3, max_cuts_override))
             kick_created = 0
             for k_ref in prof.kick_channels:
                 if kick_created >= kick_budget:
@@ -534,7 +566,9 @@ def cmd_kick(
     created = 0
     for cluster in clusters:
         try:
-            created_rec = process_single_cluster(profile, cluster, store, theme, processed_state, work_root)
+            created_rec = process_single_cluster(
+                profile, cluster, store, theme, processed_state, work_root, is_manual=True
+            )
             if created_rec is not None:
                 created += 1
         except Exception as exc:
@@ -597,7 +631,9 @@ def cmd_youtube(
     created = 0
     for cluster in clusters:
         try:
-            created_rec = process_single_cluster(profile, cluster, store, theme, processed_state, work_root)
+            created_rec = process_single_cluster(
+                profile, cluster, store, theme, processed_state, work_root, is_manual=True
+            )
             if created_rec is not None:
                 created += 1
         except Exception as exc:

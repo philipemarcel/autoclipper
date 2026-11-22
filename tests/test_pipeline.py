@@ -2339,4 +2339,88 @@ def test_meta_reels_caption_sanitizes_profanity_and_blocks_hashtag_only():
     assert "bistecone" in first_line.lower()
 
 
+def test_viral_only_gate_rejects_low_virality_and_disables_blind_kick_fallback(tmp_path: Path, monkeypatch):
+    from src.kick.analyzer import KickMomentAnalyzer
+    from src.main import process_single_cluster
+    from src.models import DirectorDecision, MomentCluster, TwitchClip, WordTimestamp
+
+    prof = _make_profile()
+    prof.detection.min_virality_score = 80
+    prof.detection.min_views_post_live = 350
+    prof.detection.allow_blind_kick_fallback = False
+
+    # 1) KickMomentAnalyzer com allow_blind_kick_fallback=False ignora clipes fracos (60 views) e VOD/live cegos
+    ka = KickMomentAnalyzer(prof)
+    monkeypatch.setattr(ka, "fetch_channel_info", lambda slug: {"slug": slug, "user": {"username": "Davy"}, "livestream": {"id": "ls1", "session_title": "Live"}, "playback_url": "https://kick.com/hls.m3u8"})
+    monkeypatch.setattr(ka, "fetch_channel_clips", lambda slug, time_window="day", sort="view": [{"id": "c_low", "views": 60, "duration": 35.0, "title": "clip fraco"}])
+    monkeypatch.setattr(ka, "fetch_channel_videos", lambda slug: [{"uuid": "v1", "duration": 7200000, "source": "https://kick.com/vod.m3u8", "is_live": False}])
+    assert ka.discover_channel_moments("davyjones", max_cuts=2, processed_state={"cuts": []}) == []
+
+    # 2) process_single_cluster descarta corte com virality_score < 80 antes de renderizar/enfileirar e grava tombstone
+    store = DriveStore(fallback_local_dir=tmp_path / "drive_viral_gate")
+    processed_state = {"cuts": []}
+    raw_mp4 = tmp_path / "raw_low.mp4"
+    raw_mp4.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+
+    class FakeMedia:
+        video_path = raw_mp4
+        duration_sec = 32.0
+        peak_Hint_sec_in_file = 15.0
+        source_type = "clip_fallback"
+
+    monkeypatch.setattr("src.main.TwitchDownloader.download_moment", lambda self, cl, wd: FakeMedia())
+    monkeypatch.setattr("src.main.WordTranscriber.transcribe_video", lambda self, vp, wd: [WordTimestamp("ok", 1.0, 1.5)])
+    monkeypatch.setattr(
+        "src.main.GeminiDirector.direct_cut",
+        lambda self, **kw: DirectorDecision(
+            main_start=0.0,
+            main_end=30.0,
+            cold_open_enabled=False,
+            teaser_start=0.0,
+            teaser_end=0.0,
+            teaser_headline="",
+            caption_text="ok acho que estamos indo",
+            hashtags=["#cortes"],
+            virality_score=58,
+            reasoning="Trecho morno sem clímax",
+        ),
+    )
+
+    render_called = False
+
+    def _fail_render(*a, **kw):
+        nonlocal render_called
+        render_called = True
+        raise AssertionError("VideoRenderer não deveria ser chamado para corte de baixa viralidade")
+
+    monkeypatch.setattr("src.main.VideoRenderer.render_all", _fail_render)
+
+    clip = TwitchClip("clip_low_1", "https://clips.twitch.tv/low1", "ok", 90, "2026-11-22T00:00:00Z", 32.0, "viewer", "1", "Alanzoka")
+    cluster = MomentCluster(
+        cluster_id="cut_low_viral",
+        profile_id=prof.id,
+        broadcaster_login="alanzoka",
+        stream_or_vod_key="vod_1",
+        mode="post_live",
+        clips=[clip],
+        video_id="vod_1",
+        vod_start_offset=100,
+        vod_end_offset=132,
+        peak_offset=115,
+        unique_clippers=1,
+        total_views=90,
+        max_views=90,
+        score=90.0,
+        dominant_title="ok",
+    )
+
+    res = process_single_cluster(prof, cluster, store, {}, processed_state, tmp_path / "work_vg", is_manual=False)
+    assert res is None
+    assert render_called is False
+    saved = store.load_state_json("processed_moments.json", {"cuts": []})
+    assert any(c.get("cut_id") == "cut_low_viral" and c.get("status") == "rejected_low_virality" for c in saved["cuts"])
+    assert store.load_state_json("drip_queue.json", {"items": []})["items"] == []
+
+
+
 
