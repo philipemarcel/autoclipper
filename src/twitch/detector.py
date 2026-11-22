@@ -58,6 +58,19 @@ class MomentDetector:
             self.cfg.min_views_single_clip_live if mode == "live_hot" else self.cfg.min_views_post_live
         ), 0.0
 
+    def _stream_cut_limit(self, duration_seconds: Optional[float]) -> int:
+        from src.streamer_baselines import compute_stream_cut_limit
+
+        hours_per_cut = float(getattr(self.cfg, "hours_per_cut", 2.0) or 0.0)
+        hard_cap = max(1, int(getattr(self.cfg, "max_cuts_per_stream", 10) or 10))
+        fallback = min(hard_cap, max(1, int(getattr(self.cfg, "target_cuts_per_live", 3) or 3)))
+        return compute_stream_cut_limit(
+            duration_seconds=duration_seconds,
+            hours_per_cut=hours_per_cut,
+            fallback_max_cuts=fallback,
+            hard_cap=hard_cap,
+        )
+
     def discover_candidates(
         self,
         helix: TwitchHelixClient,
@@ -72,12 +85,19 @@ class MomentDetector:
 
         broadcaster_id = str(user["id"])
         active_stream = helix.get_active_stream(broadcaster_id)
-        recent_vods = helix.get_recent_vods(broadcaster_id, first=4)
+        recent_vods = helix.get_recent_vods(broadcaster_id, first=6)
+
+        vod_duration_map: Dict[str, float] = {}
+        for v in recent_vods:
+            vid = str(v.get("id") or "").strip()
+            dsec = parse_twitch_duration_seconds(str(v.get("duration", "")))
+            if vid and dsec > 0:
+                vod_duration_map[vid] = float(dsec)
 
         candidates: List[MomentCluster] = []
 
         # ------------------------------------------------------------------
-        # MODO 1: QUENTE (LIVE AO VIVO)
+        # MODO 1: QUENTE (LIVE AO VIVO) — limite proporcional ao tempo decorrido da live
         # ------------------------------------------------------------------
         if active_stream:
             stream_id = str(active_stream["id"])
@@ -92,10 +112,15 @@ class MomentDetector:
                     matching_vod_id = str(v["id"])
                     break
 
+            elapsed_sec = max(60.0, (now - _parse_iso_utc(started_at)).total_seconds())
+            if matching_vod_id:
+                vod_duration_map[matching_vod_id] = max(vod_duration_map.get(matching_vod_id, 0.0), elapsed_sec)
+            live_stream_limit = self._stream_cut_limit(elapsed_sec)
+
             stream_key = matching_vod_id or f"stream_{stream_id}"
             already_cut_count = self._count_cuts_for_stream(processed_state, stream_key, stream_id)
 
-            if already_cut_count < self.cfg.max_cuts_per_stream:
+            if already_cut_count < live_stream_limit:
                 clips = helix.get_clips_in_window(
                     broadcaster_id=broadcaster_id,
                     started_at_iso=started_at,
@@ -114,7 +139,7 @@ class MomentDetector:
                     processed_state=processed_state,
                     stream_key=stream_key,
                     alt_stream_key=f"stream_{stream_id}",
-                    remaining_slots=self.cfg.max_cuts_per_stream - already_cut_count,
+                    remaining_slots=live_stream_limit - already_cut_count,
                 )
                 candidates.extend(filtered)
 
@@ -139,11 +164,12 @@ class MomentDetector:
             vod_duration_sec = parse_twitch_duration_seconds(str(vod.get("duration", "")))
             vod_end = vod_created + timedelta(seconds=max(vod_duration_sec, 600) + 1800)
             stream_title = str(vod.get("title", ""))
+            vod_stream_limit = self._stream_cut_limit(float(vod_duration_sec) if vod_duration_sec > 0 else None)
 
             already_cut_count = self._count_cuts_for_stream(
                 processed_state, vod_id, f"stream_{vod_stream_id}" if vod_stream_id else ""
             )
-            if already_cut_count >= self.cfg.max_cuts_per_stream:
+            if already_cut_count >= vod_stream_limit:
                 continue
 
             clips = helix.get_clips_in_window(
@@ -175,7 +201,7 @@ class MomentDetector:
                 processed_state=processed_state,
                 stream_key=vod_id,
                 alt_stream_key=f"stream_{vod_stream_id}" if vod_stream_id else "",
-                remaining_slots=self.cfg.max_cuts_per_stream - already_cut_count,
+                remaining_slots=vod_stream_limit - already_cut_count,
             )
             candidates.extend(filtered)
 
@@ -210,8 +236,9 @@ class MomentDetector:
                     if {c.id for c in pc.clips} & already_grabbed_ids:
                         continue
                     if pc.video_id:
+                        vod_limit = self._stream_cut_limit(vod_duration_map.get(pc.video_id))
                         existing_for_vod = self._count_cuts_for_stream(processed_state, pc.video_id)
-                        if existing_for_vod + per_vod_counts.get(pc.video_id, 0) >= self.cfg.max_cuts_per_stream:
+                        if existing_for_vod + per_vod_counts.get(pc.video_id, 0) >= vod_limit:
                             continue
                     eligible_page_clusters.append(pc)
 
@@ -224,9 +251,10 @@ class MomentDetector:
                 )
                 for pc in page_filtered:
                     if pc.video_id:
+                        vod_limit = self._stream_cut_limit(vod_duration_map.get(pc.video_id))
                         existing_for_vod = self._count_cuts_for_stream(processed_state, pc.video_id)
                         planned_for_vod = per_vod_counts.get(pc.video_id, 0)
-                        if existing_for_vod + planned_for_vod >= self.cfg.max_cuts_per_stream:
+                        if existing_for_vod + planned_for_vod >= vod_limit:
                             continue
                         per_vod_counts[pc.video_id] = planned_for_vod + 1
                     candidates.append(pc)

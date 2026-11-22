@@ -19,6 +19,7 @@ class DetectionConfig:
     min_virality_score: int = 75
     allow_blind_kick_fallback: bool = True
     target_cuts_per_live: int = 3
+    hours_per_cut: float = 2.0
 
 
 @dataclass

@@ -396,7 +396,7 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
     processed_state = store.load_state_json(PROCESSED_STATE_FILE, default={"cuts": []})
     work_root = PROJECT_ROOT / "work_tmp" / "watch"
 
-    # Calcula/atualiza semanalmente a média de score de cada streamer (atuais + novos adicionados)
+    # Calcula/atualiza semanalmente a calibração inteligente por tempo de live de cada streamer (atuais + novos)
     baseline_mgr = StreamerBaselineManager(store)
     kick_fetcher = KickMomentAnalyzer(active_profiles[0])
     streamer_baselines = baseline_mgr.ensure_profiles_baselines(
@@ -404,6 +404,7 @@ def cmd_watch(profile_filter: Optional[str] = None, max_cuts_override: Optional[
         processed_state=processed_state,
         helix=helix,
         kick_clip_fetcher=lambda slug: kick_fetcher.fetch_channel_clips(slug, time_window="week", sort="view"),
+        kick_video_fetcher=lambda slug: kick_fetcher.fetch_channel_videos(slug),
     )
 
     total_created = 0
@@ -1003,6 +1004,7 @@ def main() -> None:
             processed_state=proc_state,
             helix=helix_cli,
             kick_clip_fetcher=(lambda slug: ka.fetch_channel_clips(slug, time_window="week", sort="view")) if ka else None,
+            kick_video_fetcher=(lambda slug: ka.fetch_channel_videos(slug)) if ka else None,
             force_refresh=bool(args.force),
         )
         print(json.dumps(res, ensure_ascii=False, indent=2))

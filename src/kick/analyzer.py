@@ -81,12 +81,60 @@ class KickMomentAnalyzer:
         self.streamer_baselines = streamer_baselines if streamer_baselines is not None else {}
         self._has_custom_baselines = streamer_baselines is not None
 
+    def _stream_cut_limit(self, duration_seconds: Optional[float]) -> int:
+        from src.streamer_baselines import compute_stream_cut_limit
+
+        hours_per_cut = float(getattr(self.cfg, "hours_per_cut", 2.0) or 0.0)
+        hard_cap = max(1, int(getattr(self.cfg, "max_cuts_per_stream", 10) or 10))
+        fallback = min(hard_cap, max(1, int(getattr(self.cfg, "target_cuts_per_live", 3) or 3)))
+        return compute_stream_cut_limit(
+            duration_seconds=duration_seconds,
+            hours_per_cut=hours_per_cut,
+            fallback_max_cuts=fallback,
+            hard_cap=hard_cap,
+        )
+
+    def _build_livestream_durations(
+        self,
+        slug: str,
+        livestream: Any,
+        now_utc: datetime,
+        needed_ids: Optional[set[str]] = None,
+    ) -> Dict[str, float]:
+        durations: Dict[str, float] = {}
+        if isinstance(livestream, dict):
+            ls_id = str(livestream.get("id") or "").strip()
+            start_dt = self._parse_iso(str(livestream.get("start_time") or livestream.get("created_at") or ""))
+            if ls_id and start_dt is not None:
+                durations[ls_id] = max(60.0, (now_utc - start_dt).total_seconds())
+
+        missing = (needed_ids or set()) - set(durations.keys())
+        if needed_ids is None or missing:
+            try:
+                videos = self.fetch_channel_videos(slug)
+                for v in videos or []:
+                    if not isinstance(v, dict):
+                        continue
+                    dur_sec = _ms_or_sec_to_seconds(v.get("duration"))
+                    if dur_sec <= 0:
+                        continue
+                    vid_obj = v.get("video") or {}
+                    for key in (v.get("id"), vid_obj.get("live_stream_id"), vid_obj.get("uuid"), v.get("uuid")):
+                        skey = str(key or "").strip()
+                        if skey:
+                            durations[skey] = max(durations.get(skey, 0.0), float(dur_sec))
+            except Exception as exc:
+                logger.debug("Aviso ao buscar duração dos VODs da Kick (%s): %s", slug, exc)
+
+        return durations
+
     def _resolve_streamer_min_views(
         self,
         slug: str,
         is_live: bool,
         merged_clips: List[Dict[str, Any]],
         processed_state: Optional[Dict[str, Any]],
+        stream_durations_sec: Optional[Dict[str, float]] = None,
     ) -> int:
         clean_slug = str(slug or "").strip().lower().lstrip("@")
         entry = self.streamer_baselines.get(clean_slug)
@@ -97,9 +145,11 @@ class KickMomentAnalyzer:
                 return val
 
         # Se `streamer_baselines` está ativo e este é um streamer recém-adicionado ainda sem entrada:
-        # calcula na hora a calibração inteligente (~3 melhores momentos por live) a partir dos clipes 7d + histórico!
+        # calcula na hora a calibração inteligente por tempo de live a partir dos clipes 7d + durações + histórico!
         if self._has_custom_baselines:
             from src.streamer_baselines import (
+                DEFAULT_HOURS_PER_CUT,
+                DEFAULT_MAX_CUTS_HARD_CAP,
                 DEFAULT_TARGET_CUTS_PER_LIVE,
                 calibrate_streamer_thresholds,
                 extract_streamer_historical_views,
@@ -109,8 +159,9 @@ class KickMomentAnalyzer:
             for c in merged_clips:
                 v = int(c.get("views") or 0)
                 if v > 0:
-                    vod_id = str((c.get("vod") or {}).get("id") or "")
-                    skey = vod_id or str(c.get("created_at") or "")[:10] or "kick"
+                    ls_id = str(c.get("livestream_id") or "").strip()
+                    vod_id = str((c.get("vod") or {}).get("id") or "").strip()
+                    skey = ls_id or vod_id or str(c.get("created_at") or "")[:10] or "kick"
                     api_pairs.append((skey, float(v)))
             hist_pairs = extract_streamer_historical_views(processed_state, clean_slug, platform="kick")
             sample_pairs = api_pairs if len(api_pairs) >= 6 else (api_pairs + hist_pairs)
@@ -122,7 +173,18 @@ class KickMomentAnalyzer:
                         or DEFAULT_TARGET_CUTS_PER_LIVE
                     ),
                 )
-                cal = calibrate_streamer_thresholds(sample_pairs, target_cuts_per_live=target)
+                hpc = float(getattr(self.cfg, "hours_per_cut", DEFAULT_HOURS_PER_CUT) or 0.0)
+                hard_cap = max(
+                    1,
+                    int(getattr(self.cfg, "max_cuts_per_stream", DEFAULT_MAX_CUTS_HARD_CAP) or DEFAULT_MAX_CUTS_HARD_CAP),
+                )
+                cal = calibrate_streamer_thresholds(
+                    sample_pairs,
+                    stream_durations_sec=stream_durations_sec,
+                    hours_per_cut=hpc,
+                    target_cuts_per_live=target,
+                    max_cuts_hard_cap=hard_cap,
+                )
                 self.streamer_baselines[clean_slug] = {
                     "streamer": clean_slug,
                     "platform": "kick",
@@ -131,8 +193,11 @@ class KickMomentAnalyzer:
                     "min_views_single_clip_live": cal["min_views_single_clip_live"],
                     "min_views_post_live": cal["min_views_post_live"],
                     "min_score_cutoff": 0.0,
+                    "hours_per_cut": hpc,
                     "target_cuts_per_live": target,
                     "active_lives_7d": cal["active_lives"],
+                    "total_live_hours_7d": cal["total_live_hours"],
+                    "estimated_cuts_per_hour": cal["estimated_cuts_per_hour"],
                     "estimated_cuts_per_live": cal["estimated_cuts_per_live"],
                     "calibration_method": cal["method"],
                 }
@@ -203,7 +268,20 @@ class KickMomentAnalyzer:
                 seen_raw.add(cid)
                 merged_clips.append(clip)
 
-        min_views = self._resolve_streamer_min_views(slug, is_live, merged_clips, processed_state)
+        # Se precisar calibrar on-the-fly ou aplicar limite por duração de live, busca durações dos VODs da Kick
+        clean_slug = str(slug or "").strip().lower().lstrip("@")
+        needs_on_the_fly = self._has_custom_baselines and not self.streamer_baselines.get(clean_slug)
+        livestream_durations: Dict[str, float] = {}
+        if needs_on_the_fly:
+            livestream_durations = self._build_livestream_durations(slug, livestream, now, needed_ids=None)
+
+        min_views = self._resolve_streamer_min_views(
+            slug,
+            is_live,
+            merged_clips,
+            processed_state,
+            stream_durations_sec=livestream_durations or None,
+        )
 
         recent_cut_times = self._collect_recent_clip_times(slug, processed_state)
         eligible_clips: List[tuple[float, Dict[str, Any]]] = []
@@ -241,7 +319,20 @@ class KickMomentAnalyzer:
         chosen_clips = eligible_clips or (fallback_offline_clips if (not is_live and allow_blind_fallback) else [])
         accepted_records: List[Dict[str, Any]] = []
         base_cuts = list((processed_state or {}).get("cuts", []))
-        max_per_stream = max(1, int(getattr(self.cfg, "max_cuts_per_stream", 3) or 3))
+
+        if chosen_clips and not livestream_durations:
+            needed_ids = {
+                sid
+                for _, c in chosen_clips
+                for sid in (
+                    str(c.get("livestream_id") or "").strip(),
+                    str((c.get("vod") or {}).get("id") or "").strip(),
+                )
+                if sid
+            }
+            if needed_ids:
+                livestream_durations = self._build_livestream_durations(slug, livestream, now, needed_ids=needed_ids)
+
         per_stream_accepted: Dict[str, int] = {}
         for rank_score, clip in chosen_clips:
             cid = str(clip.get("id") or "").strip()
@@ -253,17 +344,28 @@ class KickMomentAnalyzer:
                 stream_url = page_url
 
             vod_obj = clip.get("vod") or {}
+            raw_ls_id = str(clip.get("livestream_id") or "").strip()
             raw_vod_id = str(vod_obj.get("id") or "").strip()
-            vod_uuid = raw_vod_id or f"kick_{slug}"
-            stream_key = f"kick_{slug}_{vod_uuid}"
-            clip_day = str(clip.get("created_at") or "")[:10]
-            cap_bucket = stream_key if raw_vod_id else f"{stream_key}:{clip_day or 'today'}"
-
+            raw_stream_id = raw_ls_id or raw_vod_id
+            stream_uuid = raw_stream_id or f"kick_{slug}"
+            stream_key = f"kick_{slug}_{stream_uuid}"
+            alt_stream_keys = {stream_key}
             if raw_vod_id:
+                alt_stream_keys.add(f"kick_{slug}_{raw_vod_id}")
+            if raw_ls_id:
+                alt_stream_keys.add(f"kick_{slug}_{raw_ls_id}")
+
+            clip_day = str(clip.get("created_at") or "")[:10]
+            cap_bucket = stream_key if raw_stream_id else f"{stream_key}:{clip_day or 'today'}"
+
+            stream_dur_sec = livestream_durations.get(raw_ls_id) or livestream_durations.get(raw_vod_id) or None
+            stream_limit = self._stream_cut_limit(stream_dur_sec)
+
+            if raw_stream_id:
                 existing_for_stream = sum(
                     1
                     for r in base_cuts
-                    if r.get("stream_key") == stream_key
+                    if r.get("stream_key") in alt_stream_keys
                     and r.get("status") != "rejected_low_virality"
                 )
             else:
@@ -278,12 +380,14 @@ class KickMomentAnalyzer:
                     )
                 )
 
-            if existing_for_stream + per_stream_accepted.get(cap_bucket, 0) >= max_per_stream:
+            if existing_for_stream + per_stream_accepted.get(cap_bucket, 0) >= stream_limit:
                 logger.info(
-                    "Clipe Kick %s ignorado: live %s já atingiu o teto de %d cortes/live.",
+                    "Clipe Kick %s ignorado: live %s (%.1fh) já atingiu o limite de %d corte(s) (1 a cada %.1fh).",
                     cid,
                     cap_bucket,
-                    max_per_stream,
+                    (stream_dur_sec or 0.0) / 3600.0,
+                    stream_limit,
+                    float(getattr(self.cfg, "hours_per_cut", 2.0) or 0.0),
                 )
                 continue
 

@@ -2587,30 +2587,136 @@ def test_per_streamer_smart_calibration_new_streamer_and_weekly_refresh(tmp_path
     }
     assert det._count_cuts_for_stream(state_with_rejected, "v3") == 2
 
-    # 6) KickMomentAnalyzer aplica nota individual + teto `max_cuts_per_stream=3` (ignorando rejeitados)
+    # 6) KickMomentAnalyzer aplica nota individual + limite proporcional ao tempo de live (1 corte/2h, ignorando rejeitados)
+    prof.detection.max_cuts_per_stream = 10
+    prof.detection.hours_per_cut = 2.0
     ka = KickMomentAnalyzer(prof, streamer_baselines=baselines3)
     monkeypatch.setattr(ka, "fetch_channel_info", lambda slug: {"slug": slug, "user": {"username": slug}})
     monkeypatch.setattr(
         ka,
+        "fetch_channel_videos",
+        lambda slug: [
+            {"id": "ls_short", "duration": 2 * 3600 * 1000},   # 2h -> limite 1 corte
+            {"id": "ls_long", "duration": 8 * 3600 * 1000},    # 8h -> limite 4 cortes
+        ],
+    )
+    monkeypatch.setattr(
+        ka,
         "fetch_channel_clips",
         lambda slug, time_window="day", sort="view": [
-            {"id": "k_low", "views": 500, "duration": 35.0, "title": "abaixo de 650", "vod": {"id": "vod_x"}},
-            {"id": "k_h1", "views": 950, "duration": 35.0, "title": "primeiro momento viral", "vod": {"id": "vod_x"}},
-            {"id": "k_h2", "views": 880, "duration": 35.0, "title": "segundo momento viral", "vod": {"id": "vod_x"}},
-            {"id": "k_other", "views": 820, "duration": 35.0, "title": "momento de outra live", "vod": {"id": "vod_y"}},
+            {"id": "k_low", "views": 500, "duration": 35.0, "title": "conversa tranquila no lobby", "livestream_id": "ls_long"},
+            {"id": "k_s1", "views": 980, "duration": 35.0, "title": "susto absurdo no boss final", "livestream_id": "ls_short"},
+            {"id": "k_s2", "views": 940, "duration": 35.0, "title": "explosao inesperada na ponte", "livestream_id": "ls_short"},
+            {"id": "k_l1", "views": 910, "duration": 35.0, "title": "fuga epica de helicoptero no gta", "livestream_id": "ls_long"},
+            {"id": "k_l2", "views": 870, "duration": 35.0, "title": "bug hilariante da fisica no carro", "livestream_id": "ls_long"},
+            {"id": "k_l3", "views": 830, "duration": 35.0, "title": "rage insano depois de cair da torre", "livestream_id": "ls_long"},
         ],
     )
     kick_state = {
         "cuts": [
-            {"profile_id": prof.id, "stream_key": "kick_novostreamer_vod_x", "status": "queued"},
-            {"profile_id": prof.id, "stream_key": "kick_novostreamer_vod_x", "status": "queued"},
-            {"profile_id": prof.id, "stream_key": "kick_novostreamer_vod_x", "status": "rejected_low_virality"},
+            {"profile_id": prof.id, "stream_key": "kick_novostreamer_ls_long", "status": "queued"},
+            {"profile_id": prof.id, "stream_key": "kick_novostreamer_ls_long", "status": "queued"},
+            {"profile_id": prof.id, "stream_key": "kick_novostreamer_ls_long", "status": "rejected_low_virality"},
         ]
     }
-    # vod_x já tem 2 cortes válidos (o 3º foi rejeitado) -> só cabe +1 de vod_x (k_h1), e k_h2 é barrado pelo teto de 3/live,
-    # deixando espaço para k_other de vod_y!
-    k_clusters = ka.discover_channel_moments("novostreamer", max_cuts=3, processed_state=kick_state)
-    assert [c.max_views for c in k_clusters] == [950, 820]
+    # ls_short (2h -> teto 1): pega k_s1 (980) e barra k_s2 (940).
+    # ls_long (8h -> teto 4, já tem 2 válidos + 1 rejeitado): pega k_l1 (910) e k_l2 (870), e barra k_l3 (830)!
+    k_clusters = ka.discover_channel_moments("novostreamer", max_cuts=5, processed_state=kick_state)
+    assert [c.max_views for c in k_clusters] == [980, 910, 870]
+
+
+def test_stream_duration_cut_limit_and_twitch_duration_enforcement():
+    from src.models import TwitchClip
+    from src.streamer_baselines import calibrate_streamer_thresholds, compute_stream_cut_limit
+    from src.twitch.detector import MomentDetector
+
+    # 1) Fórmula de limite por tempo de live (1 corte a cada 2h, mínimo 1, teto de segurança 10)
+    assert compute_stream_cut_limit(1.5 * 3600, hours_per_cut=2.0, hard_cap=10) == 1
+    assert compute_stream_cut_limit(2.0 * 3600, hours_per_cut=2.0, hard_cap=10) == 1
+    assert compute_stream_cut_limit(4.0 * 3600, hours_per_cut=2.0, hard_cap=10) == 2
+    assert compute_stream_cut_limit(6.0 * 3600, hours_per_cut=2.0, hard_cap=10) == 3
+    assert compute_stream_cut_limit(8.0 * 3600, hours_per_cut=2.0, hard_cap=10) == 4
+    assert compute_stream_cut_limit(12.0 * 3600, hours_per_cut=2.0, hard_cap=10) == 6
+    assert compute_stream_cut_limit(15.0 * 3600, hours_per_cut=2.0, hard_cap=10) == 8
+    assert compute_stream_cut_limit(24.0 * 3600, hours_per_cut=2.0, hard_cap=10) == 10
+    assert compute_stream_cut_limit(None, hours_per_cut=2.0, fallback_max_cuts=3, hard_cap=10) == 3
+
+    # 2) Calibração pondera cada live pela duração (live de 10h -> 5 vagas; live de 2h -> 1 vaga)
+    pairs = (
+        [("marathon_10h", v) for v in (2000.0, 1200.0, 800.0, 500.0, 350.0, 200.0, 100.0)]
+        + [("short_2h", v) for v in (400.0, 90.0, 70.0)]
+    )
+    cal = calibrate_streamer_thresholds(
+        pairs,
+        stream_durations_sec={"marathon_10h": 10 * 3600.0, "short_2h": 2 * 3600.0},
+        hours_per_cut=2.0,
+        selectivity=0.80,
+    )
+    # Total de vagas = 5 + 1 = 6; selectivity 80% -> desired = round(4.8) = 5.
+    # Em T=400: marathon tem 4 (2000,1200,800,500) + short tem 1 (400) = 5 >= 5!
+    assert cal["min_views_post_live"] == 400
+    assert cal["min_views_single_clip_live"] == 260
+    assert cal["total_live_hours"] == 12.0
+    assert cal["method"] == "duration_capped_per_2.0h"
+
+    # 3) MomentDetector aplica limite por tempo decorrido na live ao vivo (2h -> 1 corte) e no VOD (8h -> 4 cortes)
+    prof = _make_profile()
+    prof.twitch_login = "alanzoka"
+    prof.detection.hours_per_cut = 2.0
+    prof.detection.max_cuts_per_stream = 10
+    prof.detection.max_cuts_per_run = 6
+    prof.detection.min_views_single_clip_live = 100
+    prof.detection.min_views_post_live = 100
+
+    now = datetime(2026, 11, 22, 12, 0, 0, tzinfo=timezone.utc)
+
+    class FakeHelixDuration:
+        def get_user_by_login(self, login):
+            return {"id": "77", "login": login}
+
+        def get_active_stream(self, bid):
+            # Live ao vivo há exatamente 2h -> limite = 1 corte
+            return {"id": "s_live", "started_at": "2026-11-22T10:00:00Z", "game_name": "GTA", "title": "Live 2h"}
+
+        def get_recent_vods(self, bid, first=6):
+            return [
+                {"id": "vod_live", "stream_id": "s_live", "created_at": "2026-11-22T10:00:00Z", "duration": "2h0m0s", "title": "Live 2h"},
+                {"id": "vod_8h", "stream_id": "s_old", "created_at": "2026-11-21T16:00:00Z", "duration": "8h0m0s", "title": "Maratona 8h"},
+            ]
+
+        def get_clips_in_window(self, broadcaster_id, started_at_iso, ended_at_iso, max_pages=5):
+            live_titles = ["susto no corredor escuro", "gargalhada com bug do cavalo", "final absurdo do mapa"]
+            vod_titles = [
+                "assalto perfeito no banco",
+                "perseguicao policial na rodovia",
+                "queda hilariante de paraquedas",
+                "trollagem do chat no microfone",
+                "reacao epica ao trailer secreto",
+            ]
+            if started_at_iso == "2026-11-22T10:00:00Z":
+                # 3 clipes fortes na live de 2h -> só deve aceitar 1!
+                return [
+                    TwitchClip(f"lc{i}", f"https://clips.twitch.tv/lc{i}", live_titles[i], 500 - i * 50, f"2026-11-22T10:{15 + i * 20:02d}:00Z", 30.0, f"u{i}", "77", "Alanzoka", video_id="vod_live", vod_offset=200 + i * 1200)
+                    for i in range(3)
+                ]
+            if started_at_iso.startswith("2026-11-21T15:55"):
+                # 5 clipes fortes na live de 8h -> deve aceitar 4 (8h / 2h = 4)!
+                return [
+                    TwitchClip(f"vc{i}", f"https://clips.twitch.tv/vc{i}", vod_titles[i], 900 - i * 50, f"2026-11-21T{17 + i:02d}:00:00Z", 30.0, f"u{i}", "77", "Alanzoka", video_id="vod_8h", vod_offset=3600 * (i + 1))
+                    for i in range(5)
+                ]
+            return []
+
+        def get_game_name(self, gid):
+            return "GTA"
+
+    det = MomentDetector(prof)
+    cands = det.discover_candidates(FakeHelixDuration(), processed_state={"cuts": []}, now_utc=now)
+    live_cands = [c for c in cands if c.mode == "live_hot"]
+    vod_cands = [c for c in cands if c.mode == "post_live"]
+    assert len(live_cands) == 1
+    assert len(vod_cands) == 4
+
 
 
 
